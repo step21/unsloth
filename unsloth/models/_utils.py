@@ -94,6 +94,7 @@ import functools
 import textwrap
 import logging
 import warnings, subprocess, inspect, psutil, os, math
+import psutil
 from unsloth_zoo.utils import Version, get_quant_type
 from importlib.metadata import version as importlib_version
 from ..device_type import (
@@ -103,6 +104,7 @@ from ..device_type import (
     DEVICE_TYPE_TORCH,
     DEVICE_COUNT,
     ALLOW_PREQUANTIZED_MODELS,
+    clean_gpu_cache,
 )
 from ..import_fixes import UNSLOTH_ENABLE_LOGGING
 from unsloth_zoo.log import logger
@@ -160,7 +162,8 @@ def resolve_hip_gpu_stats_name(gpu_stats):
         return name + ". "
 
     try:
-        torch_name = str(torch.cuda.get_device_name(0) or "").strip()
+        from ..device_type import get_current_device, get_device_name
+        torch_name = str(get_device_name(get_current_device()) or "").strip()
         torch_name = re.sub(r"\s*\([^)]*\)\s*$", "", torch_name).strip()
     except Exception:
         torch_name = ""
@@ -209,7 +212,7 @@ def apply_unsloth_gradient_checkpointing(
         # Gradient offloading overhead is not worth it for small sequences.
         # Benchmarks show crossover point is around seq_len 384-512.
         # For seq < 512, standard gradient checkpointing is faster.
-        if max_seq_length < 512:
+        if max_seq_length < 512 or DEVICE_TYPE == "mps":
             unpatch_unsloth_smart_gradient_checkpointing()
             return True
         else:
@@ -808,14 +811,18 @@ if DEVICE_TYPE in ("cuda", "hip"):
         torch_amp_custom_fwd = torch.cuda.amp.custom_fwd
         torch_amp_custom_bwd = torch.cuda.amp.custom_bwd
     else:
-        torch_amp_custom_fwd = torch.amp.custom_fwd(device_type = "cuda")
-        torch_amp_custom_bwd = torch.amp.custom_bwd(device_type = "cuda")
+        torch_amp_custom_fwd = torch.amp.custom_fwd(device_type = DEVICE_TYPE_TORCH if DEVICE_TYPE_TORCH != "mps" else "cpu")
+        torch_amp_custom_bwd = torch.amp.custom_bwd(device_type = DEVICE_TYPE_TORCH if DEVICE_TYPE_TORCH != "mps" else "cpu")
 elif DEVICE_TYPE == "xpu":
     if Version(torch_version) < Version("2.6.0"):
         raise RuntimeError("torch.xpu currently only supports torch.version >= 2.6.0")
     else:
         torch_amp_custom_fwd = torch.amp.custom_fwd(device_type = "xpu")
         torch_amp_custom_bwd = torch.amp.custom_bwd(device_type = "xpu")
+elif DEVICE_TYPE == "mps":
+    # MPS supports autocast in newer versions
+    torch_amp_custom_fwd = torch.amp.custom_fwd(device_type = "mps")
+    torch_amp_custom_bwd = torch.amp.custom_bwd(device_type = "mps")
 # =============================================
 
 # =============================================
@@ -1137,9 +1144,11 @@ def is_big_gpu(index) -> bool:
             torch.device("xpu", index) if type(index) is int else index
         )
         min_sms = 16
+    elif DEVICE_TYPE == "mps":
+        return True
     else:
         prop = DeviceProperties.create(
-            torch.device("cuda", index) if type(index) is int else index
+            torch.device("cuda" if DEVICE_TYPE != "hip" else "hip", index) if type(index) is int else index
         )
         min_sms = 80
 
@@ -1441,11 +1450,13 @@ def get_statistics(local_files_only = False):
         disabled = True
     _get_statistics(None)
     _get_statistics("repeat", force_download = False)
-    total_memory = (
-        torch.xpu.get_device_properties(0).total_memory
-        if DEVICE_TYPE == "xpu"
-        else torch.cuda.get_device_properties(0).total_memory
-    )
+    if DEVICE_TYPE == "xpu":
+        total_memory = torch.xpu.get_device_properties(0).total_memory
+    elif DEVICE_TYPE == "mps":
+        # MPS doesn't have get_device_properties().total_memory in the same way
+        total_memory = psutil.virtual_memory().total
+    else:
+        total_memory = torch.cuda.get_device_properties(0).total_memory
     vram = total_memory / 1024 / 1024 / 1024
     if vram <= 8:
         vram = 8
@@ -2605,9 +2616,9 @@ patch_hf_quantizer()
 
 def verify_fp8_support_if_applicable(model_config):
     quant_method = get_quant_type(model_config)
-    if quant_method in ["fbgemm_fp8", "fp8"] and DEVICE_TYPE != "cuda":
+    if quant_method in ["fbgemm_fp8", "fp8"] and DEVICE_TYPE not in ["cuda", "mps"]:
         raise ValueError(
-            f"Unsloth: FP8 quantization is only supported on CUDA GPUs. You are using {DEVICE_TYPE}."
+            f"Unsloth: FP8 quantization is only supported on CUDA and MPS GPUs. You are using {DEVICE_TYPE}."
         )
 
     # [TODO] Need to add FP8 support for Intel XPUs
@@ -2616,12 +2627,12 @@ def verify_fp8_support_if_applicable(model_config):
         if quant_method == "fbgemm_fp8" and major_version < 9:
             # While L4 does support FP8 as data type, it doesn't have fbgemm (package) support yet. So we restrict it.
             raise ValueError(
-                f"Unsloth: FBGEMM FP8 quantization is only supported on H100 and higher GPUs. L4 is not supported. You are using {torch.cuda.get_device_name()}. Refer to https://developer.nvidia.com/cuda-gpus for more details."
+                f"Unsloth: FBGEMM FP8 quantization is only supported on H100 and higher GPUs. L4 is not supported. You are using {get_device_name()}. Refer to https://developer.nvidia.com/cuda-gpus for more details."
             )
         if quant_method == "fp8" and major_version * 10 + minor_version < 89:
             # In case of block quantized, we allow L4 because we fall back to torchao kernels.
             raise ValueError(
-                f"Unsloth: FP8 quantization is only supported on L4 and higher GPUs with compute capability 8.9 or higher. You are using {torch.cuda.get_device_name()}. Refer to https://developer.nvidia.com/cuda-gpus for more details."
+                f"Unsloth: FP8 quantization is only supported on L4 and higher GPUs with compute capability 8.9 or higher. You are using {get_device_name()}. Refer to https://developer.nvidia.com/cuda-gpus for more details."
             )
 
 
@@ -2788,7 +2799,7 @@ def make_fast_generate_wrapper(original_generate):
             raise ValueError(
                 "Unsloth: `sampling_params` is only supported when `fast_inference=True` (vLLM). "
                 "Since `fast_inference=False`, use HuggingFace generate arguments instead:\n"
-                "  model.fast_generate(**tokens.to('cuda'), max_new_tokens=64, temperature=1.0, top_p=0.95)"
+                f"  model.fast_generate(**tokens.to('{DEVICE_TYPE_TORCH}'), max_new_tokens=64, temperature=1.0, top_p=0.95)"
             )
 
         if "lora_request" in kwargs:
@@ -2819,7 +2830,7 @@ def make_fast_generate_wrapper(original_generate):
                     '      return_tensors="pt", return_dict=True\n'
                     "  )\n"
                     "  output = model.fast_generate(\n"
-                    "      **messages.to('cuda'),\n"
+                    f"      **messages.to('{DEVICE_TYPE_TORCH}'),\n"
                     "      max_new_tokens=64,\n"
                     "      temperature=1.0,\n"
                     "  )"

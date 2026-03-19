@@ -16,7 +16,7 @@
 import triton
 import triton.language as tl
 import torch
-from ..device_type import DEVICE_COUNT
+from ..device_type import DEVICE_COUNT, is_mps
 from .utils import calculate_settings, torch_gpu_device, torch_device_stream
 
 
@@ -278,6 +278,32 @@ class Fast_RoPE_Embedding(torch.autograd.Function):
 
 
 # [TODO] Unsure why RoPE Embedding is not torch.compiling properly
+def torch_rope_embedding(Q, K, cos, sin, position_ids):
+    if position_ids is not None:
+        # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
+        cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
+        sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
+        cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
+        sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
+    else:
+        # If position_ids is None, slice cos and sin to match Q's seq_len
+        q_len = Q.shape[2]
+        cos = cos.squeeze()
+        sin = sin.squeeze()
+        cos = cos[:q_len, :].unsqueeze(0).unsqueeze(0) # [1, 1, q_len, dim]
+        sin = sin[:q_len, :].unsqueeze(0).unsqueeze(0) # [1, 1, q_len, dim]
+
+    # Q * cos + rotate_half(Q) * sin
+    half = Q.shape[-1] // 2
+    RH_Q = torch.cat((-Q[..., half:], Q[..., :half]), dim = -1)
+    Q = Q * cos + RH_Q * sin
+
+    half_K = K.shape[-1] // 2
+    RH_K = torch.cat((-K[..., half_K:], K[..., :half_K]), dim = -1)
+    K = K * cos + RH_K * sin
+    return Q, K
+
+# [TODO] Unsure why RoPE Embedding is not torch.compiling properly
 @torch.compiler.disable
 def fast_rope_embedding(
     Q,
@@ -286,6 +312,9 @@ def fast_rope_embedding(
     sin,
     rope_embedding_indices = None,
 ):
+    if is_mps():
+        return torch_rope_embedding(Q, K, cos, sin, rope_embedding_indices)
+
     if rope_embedding_indices is not None:
         Q_out, K_out = Fast_RoPE_Embedding_QK.apply(
             Q, K, cos, sin, rope_embedding_indices

@@ -47,12 +47,8 @@ if Version(torch.__version__) < Version("2.4.0"):
     torch_amp_custom_fwd = torch.cuda.amp.custom_fwd
     torch_amp_custom_bwd = torch.cuda.amp.custom_bwd
 else:
-    torch_amp_custom_fwd = torch.amp.custom_fwd(device_type = "cuda")
-    torch_amp_custom_bwd = torch.amp.custom_bwd(device_type = "cuda")
-
-if DEVICE_TYPE == "xpu":
-    torch_amp_custom_fwd = torch.amp.custom_fwd(device_type = "xpu")
-    torch_amp_custom_bwd = torch.amp.custom_bwd(device_type = "xpu")
+    torch_amp_custom_fwd = torch.amp.custom_fwd(device_type = DEVICE_TYPE_TORCH)
+    torch_amp_custom_bwd = torch.amp.custom_bwd(device_type = DEVICE_TYPE_TORCH)
 
 
 # tl.math.tanh now is libdevice.tanh
@@ -129,14 +125,15 @@ get_ptr = bnb.functional.get_ptr
 if DEVICE_TYPE == "xpu":
     HAS_XPU_STREAM = True
 
+from contextlib import nullcontext
 if DEVICE_COUNT > 1:
     if DEVICE_TYPE in ("cuda", "hip"):
         torch_gpu_device = torch.cuda.device
     elif DEVICE_TYPE == "xpu":
         torch_gpu_device = torch.xpu.device
+    elif DEVICE_TYPE == "mps":
+        torch_gpu_device = lambda x: nullcontext()
 else:
-    from contextlib import nullcontext
-
     def torch_gpu_device(device):
         return nullcontext()
 
@@ -144,6 +141,8 @@ else:
 # INTEL GPU Specific Logic
 if DEVICE_TYPE == "xpu":
     _gpu_getCurrentRawStream = torch._C._xpu_getCurrentRawStream
+elif DEVICE_TYPE == "mps":
+    _gpu_getCurrentRawStream = lambda x: None
 # NVIDIA GPU Default Logic
 else:
     _gpu_getCurrentRawStream = torch._C._cuda_getCurrentRawStream
@@ -176,7 +175,8 @@ if DEVICE_TYPE == "xpu":
         XPU_STREAMS[k] = v
     XPU_STREAMS = tuple(XPU_STREAMS)
     del _XPU_STREAMS
-else:
+    CUDA_STREAMS = (None,)
+elif DEVICE_TYPE in ("cuda", "hip"):
     # NVIDIA GPU Default Logic
     _CUDA_STREAMS = {
         (index := torch.cuda.device(i).idx): ctypes.c_void_p(
@@ -191,6 +191,13 @@ else:
         CUDA_STREAMS[k] = v
     CUDA_STREAMS = tuple(CUDA_STREAMS)
     del _CUDA_STREAMS
+    XPU_STREAMS = (None,)
+else:
+    # MPS or CPU
+    CUDA_STREAMS = (None,)
+    XPU_STREAMS = (None,)
+    WEIGHT_BUFFERS = [None] * DEVICE_COUNT
+    ABSMAX_BUFFERS = [None] * DEVICE_COUNT
 
 # Bitsandbytes operations
 ctypes_c_int = ctypes.c_int
@@ -209,9 +216,15 @@ else:
     cgemm_4bit_inference_naive_bf16 = bnb.functional.lib.cgemm_4bit_inference_naive_bf16
 
 
-torch_device_stream = (
-    torch.xpu.current_stream if DEVICE_TYPE == "xpu" else torch.cuda.current_stream
-)
+def torch_device_stream(device):
+    if DEVICE_TYPE == "xpu":
+        return torch.xpu.current_stream(device)
+    elif DEVICE_TYPE in ("cuda", "hip"):
+        return torch.cuda.current_stream(device)
+    elif DEVICE_TYPE == "mps":
+        return None # MPS does not have streams in the same way
+    else:
+        return None
 
 torch_mm = torch.mm
 torch_mv = torch.mv

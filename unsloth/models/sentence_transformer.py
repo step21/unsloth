@@ -1346,11 +1346,16 @@ class FastSentenceTransformer(FastModel):
 
         # if for_inference == True, skip Unsloth optimizations to avoid torch compile issues
         if for_inference:
+            from ..device_type import DEVICE_TYPE_TORCH
+            if DEVICE_TYPE_TORCH == "mps":
+                # SentenceTransformer doesn't support "mps" string directly in some versions
+                # or might need specific handling. But generally device="mps" works.
+                pass
             st_device = device_map
             if isinstance(st_device, dict) or (
                 isinstance(st_device, str) and st_device in ["auto", "sequential"]
             ):
-                st_device = None
+                st_device = DEVICE_TYPE_TORCH
 
             # this was added because when loading for inference it was defaulting to float32
             # propagate dtype to model_kwargs, default to "auto"
@@ -1444,7 +1449,7 @@ class FastSentenceTransformer(FastModel):
             if isinstance(st_device, dict) or (
                 isinstance(st_device, str) and st_device in ["auto", "sequential"]
             ):
-                st_device = "cuda"
+                st_device = DEVICE_TYPE_TORCH
 
             # Check if model supports SDPA (Scaled Dot Product Attention) for extra speedup
             supports_sdpa = False

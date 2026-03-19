@@ -20,6 +20,7 @@ from .utils import (
     triton_tanh,
     torch_gpu_device,
 )
+from ..device_type import is_mps
 
 # signed int32 max is 2**31-1 so num_elements cannot exceed 2**31
 NUM_INT32_ELEMENTS = 2**31
@@ -61,6 +62,9 @@ def _exact_forward_kernel(
 
 
 def geglu_exact_forward_kernel(gate, up):
+    if is_mps():
+        return torch.nn.functional.gelu(gate, approximate = "none") * up
+
     batch, seq_len, hd = gate.shape
     n_elements = gate.numel()
     device = gate.device
@@ -138,6 +142,26 @@ def _exact_backward_kernel(
 
 
 def geglu_exact_backward_kernel(DW, e, g):
+    if is_mps():
+        # Standard autograd should handle backward if we don't use the kernel.
+        # But Unsloth uses these manual kernels for speed.
+        # In MPS, we'll let it be handled by standard autograd if we are not using these kernels.
+        # Actually, if we are in the backward pass of a custom autograd function, we need this.
+        # For now, let's provide a basic PyTorch version.
+        orig_dtype = e.dtype
+        e = e.to(torch.float32)
+        f_partial = 0.5 * (torch.erf(e / 1.4142135623730951) + 1.0)
+        f = (f_partial * e).to(orig_dtype)
+        df_de = (f_partial + 0.3989422804014327 * e * torch.exp(-0.5 * e * e)).to(orig_dtype)
+        h = f * g
+        df = DW * f
+        dg = DW * g
+        de = dg * df_de
+        DW.copy_(h)
+        e.copy_(df)
+        g.copy_(de)
+        return DW, e, g
+
     batch_seq_len, hd = e.shape
     n_elements = e.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
@@ -191,6 +215,9 @@ def _approx_forward_kernel(
 
 
 def geglu_approx_forward_kernel(gate, up):
+    if is_mps():
+        return torch.nn.functional.gelu(gate, approximate = "tanh") * up
+
     batch, seq_len, hd = gate.shape
     n_elements = gate.numel()
     device = gate.device
@@ -275,6 +302,31 @@ def _approx_backward_kernel(
 
 
 def geglu_approx_backward_kernel(DW, e, g):
+    if is_mps():
+        # Standard autograd should handle backward if we don't use the kernel.
+        # But Unsloth uses these manual kernels for speed.
+        # In MPS, we'll let it be handled by standard autograd if we are not using these kernels.
+        # Actually, if we are in the backward pass of a custom autograd function, we need this.
+        # For now, let's provide a basic PyTorch version.
+        orig_dtype = e.dtype
+        e = e.to(torch.float32)
+        s = 0.7978845608028654
+        a = s * e
+        b = a * 0.044715 * e * e
+        T = 1.0 + torch.tanh(a + b)
+        T2 = 0.5 * T
+        Q2 = -T2 * (T - 2.0) * (a + 3.0 * b)
+        df_de = (T2 + Q2).to(orig_dtype)
+        f = (T2 * e).to(orig_dtype)
+        h = f * g
+        df = DW * f
+        dg = DW * g
+        de = dg * df_de
+        DW.copy_(h)
+        e.copy_(df)
+        g.copy_(de)
+        return DW, e, g
+
     batch_seq_len, hd = e.shape
     n_elements = e.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)

@@ -1323,12 +1323,12 @@ def _patch_trl_rl_trainers(trainer_file = "grpo_trainer"):
         if DEVICE_TYPE == "cuda":
             # CUDA-specific options (added to base options)
             cuda_options = """
-            "triton.enable_persistent_tma_matmul": torch.cuda.get_device_capability()[0] >= 9,"""
+            "triton.enable_persistent_tma_matmul": torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9,"""
             # cutlass options were added in PyTorch 2.8.0
             if torch_version >= Version("2.8.0"):
                 cuda_options += """
-            "cuda.cutlass_epilogue_fusion_enabled": torch.cuda.get_device_capability()[0] >= 9,
-            "cuda.cutlass_tma_only": torch.cuda.get_device_capability()[0] >= 9,"""
+            "cuda.cutlass_epilogue_fusion_enabled": torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9,
+            "cuda.cutlass_tma_only": torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9,"""
             cuda_options += """
             "cuda.compile_opt_level"              : "-O2",
             "cuda.enable_cuda_lto"                : True,
@@ -1755,7 +1755,7 @@ def patch_functions(RLTrainer, trainer_file, RLTrainer_name, all_imports, import
 
         """
         import torch
-        X = torch.ones((2, 2048, 201088), dtype = torch.bfloat16, device = "cuda")
+        X = torch.ones((2, 2048, 201088), dtype = torch.bfloat16, device = f"{DEVICE_TYPE_TORCH}:0")
         X[torch.randperm(2, dtype = torch.int64, device = X.device)]
 
         will error out in torch 2.8 AcceleratorError: CUDA error: invalid configuration argument

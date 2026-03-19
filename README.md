@@ -45,7 +45,7 @@ Unsloth Studio works on **Windows, Linux, WSL** and **macOS**.
 
 * **CPU:** Supported for **chat inference only**
 * **NVIDIA:** Training works on RTX 30/40/50, Blackwell, DGX Spark, Station and more
-* **macOS:** Currently supports chat only; **MLX training** is coming very soon
+* **macOS:** Support for Apple Silicon GPU (MPS) training and inference is now available in beta! Use PyTorch's `mps` backend for 2x faster training.
 * **AMD:** Chat works. Train with [Unsloth Core](#unsloth-core-code-based). Studio support is coming soon.
 * **Coming soon:** Training support for Apple MLX, AMD, and Intel.
 * **Multi-GPU:** Available now, with a major upgrade on the way
@@ -136,7 +136,14 @@ uv pip install unsloth --torch-backend=auto
 For Windows, `pip install unsloth` works only if you have Pytorch installed. Read our [Windows Guide](https://unsloth.ai/docs/get-started/install/windows-installation).
 You can use the same Docker image as Unsloth Studio.
 
-#### AMD, Intel
+#### Apple Silicon (macOS), AMD, Intel
+For Apple Silicon (M1, M2, M3, M4), Unsloth now supports training using PyTorch's `mps` backend. High-performance native PyTorch fallbacks are used since Triton is not supported on macOS.
+To install on macOS:
+```bash
+pip install unsloth torchao
+```
+*Note: `torchao` is recommended for quantization on Apple Silicon.*
+
 For RTX 50x, B200, 6000 GPUs: `uv pip install unsloth --torch-backend=auto`. Read our guides for: [Blackwell](https://unsloth.ai/docs/blog/fine-tuning-llms-with-blackwell-rtx-50-series-and-unsloth) and [DGX Spark](https://unsloth.ai/docs/blog/fine-tuning-llms-with-nvidia-dgx-spark-and-unsloth). <br>
 To install Unsloth on **AMD** and **Intel** GPUs, follow our [AMD Guide](https://unsloth.ai/docs/get-started/install/amd) and [Intel Guide](https://unsloth.ai/docs/get-started/install/intel).
 

@@ -16,6 +16,7 @@ import triton
 import triton.language as tl
 import torch
 from .utils import calculate_settings, torch_gpu_device
+from ..device_type import is_mps
 
 # signed int32 max is 2**31-1 so num_elements cannot exceed 2**31
 NUM_INT32_ELEMENTS = 2**31
@@ -56,7 +57,14 @@ def _fg_kernel(
     tl.store(h + offsets, h_row, mask = mask)
 
 
+def torch_swiglu_fg(e, g):
+    return e * torch.nn.functional.sigmoid(e) * g
+
+
 def swiglu_fg_kernel(e, g):
+    if is_mps():
+        return torch_swiglu_fg(e, g)
+
     batch, seq_len, hd = e.shape
     n_elements = e.numel()
     h = torch.empty((batch, seq_len, hd), dtype = e.dtype, device = e.device)
@@ -128,6 +136,25 @@ def _DWf_DW_dfg_kernel(
 
 
 def swiglu_DWf_DW_dfg_kernel(DW, e, g):
+    if is_mps():
+        # Standard autograd should handle backward if we don't use the kernel.
+        # But Unsloth uses these manual kernels for speed.
+        # In MPS, we'll let it be handled by standard autograd if we are not using these kernels.
+        # Actually, if we are in the backward pass of a custom autograd function, we need this.
+        # For now, let's provide a basic PyTorch version.
+        orig_dtype = e.dtype
+        e = e.to(torch.float32)
+        se = torch.sigmoid(e)
+        f = (se * e).to(orig_dtype)
+        h = (f * g)
+        df = (DW * f)
+        dg = (DW * g)
+        de = (dg.to(torch.float32) * se * (1.0 + e * (1.0 - se))).to(orig_dtype)
+        DW.copy_(h)
+        e.copy_(df)
+        g.copy_(de)
+        return DW, e, g
+
     batch_seq_len, hd = e.shape  # Flattened to 2D, so 1st dim is bsz * seq_len
     n_elements = e.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)

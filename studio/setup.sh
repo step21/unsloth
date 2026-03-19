@@ -344,6 +344,9 @@ rm -rf "$LLAMA_CPP_DIR"
         if [ "$BUILD_OK" = true ]; then
             # Skip tests/examples we don't need (faster build)
             CMAKE_ARGS="-DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON -DGGML_NATIVE=ON"
+            if [ "$(uname)" == "Darwin" ]; then
+                CMAKE_ARGS="$CMAKE_ARGS -DGGML_METAL=ON"
+            fi
 
             # Use ccache if available (dramatically faster rebuilds)
             if command -v ccache &>/dev/null; then
@@ -396,6 +399,9 @@ rm -rf "$LLAMA_CPP_DIR"
 
                 # Multi-threaded nvcc compilation (uses all CPU cores per .cu file)
                 CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CUDA_FLAGS=--threads=0"
+            elif [ "$(uname)" == "Darwin" ]; then
+                echo "   Building with Metal support (macOS detected)..."
+                # -DGGML_METAL=ON is already set above
             elif [ -d /usr/local/cuda ] || nvidia-smi &>/dev/null; then
                 echo "   CUDA driver detected but nvcc not found — building CPU-only"
                 echo "   To enable GPU: install cuda-toolkit or add nvcc to PATH"

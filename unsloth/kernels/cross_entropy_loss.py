@@ -23,6 +23,7 @@ from .utils import (
     torch_gpu_device,
     is_cdna,
 )
+from ..device_type import is_mps
 from transformers.models.llama.modeling_llama import logger
 from unsloth_zoo.utils import Version
 
@@ -421,6 +422,27 @@ class Fast_CrossEntropyLoss(torch.autograd.Function):
         )
 
 
+def torch_cross_entropy_loss(
+    logits,
+    labels,
+    logit_softcapping = 0,
+    logit_scaling = 0,
+):
+    # Standard PyTorch fallback
+    if logit_scaling != 0:
+        logits = logits * logit_scaling
+    if logit_softcapping != 0:
+        logits = logit_softcapping * torch.tanh(logits / logit_softcapping)
+
+    batch, seq_len, d = logits.shape
+    loss = torch.nn.functional.cross_entropy(
+        logits.view(batch * seq_len, d),
+        labels.view(-1),
+        reduction = "none",
+    )
+    return loss
+
+
 def fast_cross_entropy_loss(
     logits,
     labels,
@@ -439,12 +461,15 @@ def fast_cross_entropy_loss(
     assert labels.shape == (batch, seq_len)
 
     device = logits.device
-    loss = Fast_CrossEntropyLoss.apply(
-        logits.view(batch * seq_len, d),
-        labels.view(-1),
-        logit_softcapping,
-        logit_scaling,
-    )
+    if is_mps():
+        loss = torch_cross_entropy_loss(logits, labels, logit_softcapping, logit_scaling)
+    else:
+        loss = Fast_CrossEntropyLoss.apply(
+            logits.view(batch * seq_len, d),
+            labels.view(-1),
+            logit_softcapping,
+            logit_scaling,
+        )
     if n_items is None:
         n_items = torch.count_nonzero(labels != -100)
     if torch.is_tensor(n_items):

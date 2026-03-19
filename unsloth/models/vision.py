@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch
+import psutil
 from transformers import (
     BitsAndBytesConfig,
     AutoProcessor,
@@ -219,10 +220,10 @@ def unsloth_base_fast_generate(
 
     # Mixed precision autocast
     if os.environ.get("UNSLOTH_FORCE_FLOAT32", "0") == "1":
-        autocaster = torch.autocast(device_type = DEVICE_TYPE_TORCH, dtype = torch.float16)
+        autocaster = torch.autocast(device_type = DEVICE_TYPE_TORCH if DEVICE_TYPE_TORCH != "mps" else "cpu", dtype = torch.float16)
         dtype = torch.float16
     else:
-        autocaster = torch.autocast(device_type = DEVICE_TYPE_TORCH, dtype = dtype)
+        autocaster = torch.autocast(device_type = DEVICE_TYPE_TORCH if DEVICE_TYPE_TORCH != "mps" else "cpu", dtype = dtype)
     # Prepare LoRA
     # state_dict = convert_lora_modules(self, dtype = dtype)
 
@@ -490,6 +491,7 @@ class FastBaseModel:
                 vllm_version = f" vLLM: {importlib_version('vllm')}."
             except:
                 vllm_version = ""
+            max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
         elif DEVICE_TYPE == "hip":
             gpu_stats = torch.cuda.get_device_properties(0)
             gpu_stats_name = resolve_hip_gpu_stats_name(gpu_stats)
@@ -499,6 +501,7 @@ class FastBaseModel:
                 vllm_version = f" vLLM: {importlib_version('vllm')}."
             except:
                 vllm_version = ""
+            max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
         elif DEVICE_TYPE == "xpu":
             gpu_stats = torch.xpu.get_device_properties(0)
             gpu_stats_name = (
@@ -508,10 +511,14 @@ class FastBaseModel:
             gpu_stats_snippet = f"Intel Toolkit: {gpu_version}."
             # [TODO] After adding vLLM support for XPU, change this
             vllm_version = ""
+            max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
+        elif DEVICE_TYPE == "mps":
+            gpu_stats_name = "Apple Silicon. "
+            gpu_stats_snippet = ""
+            vllm_version = ""
+            max_memory = round(psutil.virtual_memory().total / 1024 / 1024 / 1024, 3)
         else:
             raise ValueError(f"Unsloth: Unsupported device type: {DEVICE_TYPE}")
-
-        max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
 
         arch_name = model_type_arch.title()
         arch_name = arch_name.replace("_Vl_", "_VL_").replace("_Moe", "_MoE")
@@ -931,12 +938,10 @@ class FastBaseModel:
                 for jj, (name, module) in enumerate(model.named_modules()):
                     exec(custom_datatype)
         # Clear deleted GPU items
+        from ..device_type import clean_gpu_cache
         for _ in range(3):
             gc.collect()
-            if DEVICE_TYPE in ("cuda", "hip"):
-                torch.cuda.empty_cache()
-            elif DEVICE_TYPE == "xpu":
-                torch.xpu.empty_cache()
+            clean_gpu_cache()
 
         # Counteract saved tokenizers
         tokenizer_name = model_name if tokenizer_name is None else tokenizer_name

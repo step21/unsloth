@@ -17,8 +17,11 @@ except: raise ImportError('Install torch via `pip install torch`')
 from packaging.version import Version as V
 import re
 v = V(re.match(r"[0-9\.]{3,}", torch.__version__).group(0))
-cuda = str(torch.version.cuda)
-is_ampere = torch.cuda.get_device_capability()[0] >= 8
+if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    print("pip install unsloth torchao")
+    import sys; sys.exit(0)
+cuda = str(getattr(torch.version, "cuda", "0.0"))
+is_ampere = torch.cuda.get_device_capability()[0] >= 8 if hasattr(torch.cuda, "get_device_capability") else False
 USE_ABI = torch._C._GLIBCXX_USE_CXX11_ABI
 if cuda not in ("11.8", "12.1", "12.4", "12.6", "12.8", "13.0"): raise RuntimeError(f"CUDA = {cuda} not supported!")
 if   v <= V('2.1.0'): raise RuntimeError(f"Torch = {v} too old!")

@@ -132,6 +132,8 @@ def suppress_cuda_printf():
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                torch.mps.synchronize()
         except Exception:
             pass
         if _libc is not None:
@@ -1051,17 +1053,18 @@ def check_vllm_torch_sm100_compatibility():
     try:
         import torch
 
-        if not torch.cuda.is_available():
+        if not (hasattr(torch, "cuda") and torch.cuda.is_available()):
             return
 
         has_sm100 = False
         sm100_gpu_name = None
-        for i in range(torch.cuda.device_count()):
-            major, minor = torch.cuda.get_device_capability(i)
-            if major == 10:
-                has_sm100 = True
-                sm100_gpu_name = torch.cuda.get_device_name(i)
-                break
+        if hasattr(torch, "cuda") and torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                major, minor = torch.cuda.get_device_capability(i)
+                if major == 10:
+                    has_sm100 = True
+                    sm100_gpu_name = torch.cuda.get_device_name(i)
+                    break
 
         if not has_sm100:
             return
@@ -1106,18 +1109,19 @@ def fix_vllm_pdl_blackwell():
     try:
         import torch
 
-        if not torch.cuda.is_available():
+        if not (hasattr(torch, "cuda") and torch.cuda.is_available()):
             return
 
         # Scan all GPUs for SM100 - fix applies globally via env var and monkey-patch
         has_sm100 = False
         sm100_gpu_name = None
-        for i in range(torch.cuda.device_count()):
-            major, minor = torch.cuda.get_device_capability(i)
-            if major == 10:
-                has_sm100 = True
-                sm100_gpu_name = torch.cuda.get_device_name(i)
-                break
+        if hasattr(torch, "cuda") and torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                major, minor = torch.cuda.get_device_capability(i)
+                if major == 10:
+                    has_sm100 = True
+                    sm100_gpu_name = torch.cuda.get_device_name(i)
+                    break
 
         if not has_sm100:
             return

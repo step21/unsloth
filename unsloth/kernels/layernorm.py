@@ -17,6 +17,7 @@ import triton
 import triton.language as tl
 import torch
 from .utils import calculate_settings, torch_gpu_device
+from ..device_type import is_mps
 from unsloth_zoo.patching_utils import (
     patch_layernorm,
 )
@@ -178,6 +179,14 @@ def fast_layernorm(layernorm, X):
         if hasattr(layernorm, "variance_epsilon")
         else layernorm.eps
     )
+    if is_mps():
+        return torch.nn.functional.layer_norm(
+            X,
+            (X.shape[-1],),
+            weight = W,
+            bias = bias,
+            eps = eps,
+        )
     out = Fast_Layernorm.apply(X, W, bias, eps)
     return out
 
@@ -191,18 +200,20 @@ def test_layernorm(
     seqlen = 3341,
 ):
     from torch.nn import LayerNorm
+    from unsloth.device_type import DEVICE_TYPE_TORCH
 
-    layernorm = LayerNorm((dim,), eps = eps, device = "cuda", dtype = dtype)
-    torch.cuda.manual_seed(random_state)
+    layernorm = LayerNorm((dim,), eps = eps, device = DEVICE_TYPE_TORCH, dtype = dtype)
+    if DEVICE_TYPE_TORCH == "cuda":
+        torch.cuda.manual_seed(random_state)
     torch.manual_seed(random_state)
     torch.nn.init.uniform_(layernorm.weight)
     torch.nn.init.uniform_(layernorm.bias)
-    X = torch.randn((bsz, seqlen, dim), dtype = dtype, device = "cuda")
+    X = torch.randn((bsz, seqlen, dim), dtype = dtype, device = DEVICE_TYPE_TORCH)
     XX = X.clone()
     X.requires_grad_(True)
     XX.requires_grad_(True)
     Y = layernorm(X)
-    YY = torch.randn((bsz, seqlen, dim), dtype = dtype, device = "cuda", requires_grad = True)
+    YY = torch.randn((bsz, seqlen, dim), dtype = dtype, device = DEVICE_TYPE_TORCH, requires_grad = True)
     Y.backward(YY)
     correct_grad = X.grad.clone()
     # from unsloth.kernels import fast_layernorm
@@ -212,9 +223,10 @@ def test_layernorm(
 
 
 def testing_suite_layernorm():
+    from unsloth.device_type import DEVICE_TYPE_TORCH
     for dim in [512, 1024, 2048]:
         for dtype in [torch.float16, torch.bfloat16]:
-            with torch.autocast(device_type = "cuda", dtype = dtype):
+            with torch.autocast(device_type = DEVICE_TYPE_TORCH, dtype = dtype):
                 for seqlen in [3341, 2048, 349]:
                     for random_state in [3407, 42]:
                         test_layernorm(

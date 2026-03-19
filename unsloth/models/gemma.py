@@ -67,7 +67,7 @@ def fast_geglu_inference(self, X):
     # up   = self.up_proj(X)
     bsz, _, hd = X.shape
     # mlp_size = self.config.intermediate_size
-    # temp = torch.empty((2, bsz, 1, mlp_size), dtype = X.dtype, device = "cuda:0")
+    # temp = torch.empty((2, bsz, 1, mlp_size), dtype = X.dtype, device = f"{DEVICE_TYPE_TORCH}:0")
 
     gate = fast_linear_forward(self.gate_proj, X)  # , out = temp[0])
     up = fast_linear_forward(self.up_proj, X)  # , out = temp[1])
@@ -286,7 +286,7 @@ class GemmaFixedRotaryEmbedding(torch.nn.Module):
             dim = getattr(config, "head_dim", None)
             if dim is None:
                 dim = int((config.hidden_size // config.num_attention_heads))
-            device = "cuda"
+            device = DEVICE_TYPE_TORCH
             max_position_embeddings = config.max_position_embeddings
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
@@ -306,10 +306,10 @@ class GemmaFixedRotaryEmbedding(torch.nn.Module):
 
         # dummy so that patch_utils doesn't fail for now
         self.cos_cached = torch.empty(
-            1, device = torch.cuda.current_device(), dtype = torch.get_default_dtype()
+            1, device = get_current_device(), dtype = torch.get_default_dtype()
         )
         self.sin_cached = torch.empty(
-            1, device = torch.cuda.current_device(), dtype = torch.get_default_dtype()
+            1, device = get_current_device(), dtype = torch.get_default_dtype()
         )
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
@@ -350,7 +350,8 @@ class GemmaFixedRotaryEmbedding(torch.nn.Module):
 
     def get_cached(self, seq_len = None, device_index = None):
         if device_index is None:
-            device_index = torch.cuda.current_device()
+            device_index = get_current_device()
+            if device_index == "mps": device_index = 0
         return self.multi_gpu_cos_cached[device_index], self.multi_gpu_sin_cached[
             device_index
         ]
@@ -489,5 +490,5 @@ class FastGemmaModel(FastLlamaModel):
 
         for _ in range(3):
             gc.collect()
-            torch.cuda.empty_cache()
+            clean_gpu_cache()
         return model, tokenizer

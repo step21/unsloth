@@ -14,6 +14,7 @@
 
 import torch
 import gc
+import psutil
 import math
 import functools
 from typing import Optional, Tuple, List, Union
@@ -77,6 +78,12 @@ from transformers.modeling_attn_mask_utils import (
 from ..kernels import *
 from ..tokenizer_utils import *
 from .vision import FastBaseModel
+from ..device_type import (
+    clean_gpu_cache,
+    get_current_device,
+    is_bf16_supported,
+    DEVICE_TYPE_TORCH,
+)
 
 # Final patching code
 from transformers.models.llama.modeling_llama import (
@@ -122,13 +129,6 @@ HAS_XFORMERS = xformers is not None
 BlockDiagonalCausalMask = (
     xformers.attn_bias.BlockDiagonalCausalMask if HAS_XFORMERS else None
 )
-
-if DEVICE_TYPE == "xpu":
-    clean_gpu_cache = torch.xpu.empty_cache
-    get_current_device = torch.xpu.current_device
-else:
-    clean_gpu_cache = torch.cuda.empty_cache
-    get_current_device = torch.cuda.current_device
 
 
 def original_apply_qkv(self, X):
@@ -229,7 +229,7 @@ def _fast_prepare_inputs_for_generation(
         device = inputs_embeds.device
     else:
         bs, seq_length = 1, 0
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = DEVICE_TYPE_TORCH if (torch.cuda.is_available() or (hasattr(torch.backends, "mps") and torch.backends.mps.is_available())) else "cpu"
 
     if past_key_values is not None:
         # Check for uninitialized DynamicCache
@@ -256,7 +256,7 @@ def _fast_prepare_inputs_for_generation(
                 device = inputs_embeds.device
             else:
                 bs, seq_length = 1, 0
-                device = "cuda" if torch.cuda.is_available() else "cpu"
+                device = DEVICE_TYPE_TORCH if (torch.cuda.is_available() or (hasattr(torch.backends, "mps") and torch.backends.mps.is_available())) else "cpu"
 
             if hasattr(past_key_values, "get_seq_length"):
                 past_len = int(past_key_values.get_seq_length())
@@ -506,18 +506,21 @@ def LlamaAttention_fast_forward_inference(
     cos = cos[position_ids].unsqueeze(1).to(device = Qn.device, dtype = Qn.dtype)
     sin = sin[position_ids].unsqueeze(1).to(device = Qn.device, dtype = Qn.dtype)
 
+    # Ensure cos and sin match Qn's sequence length (dim 2)
+    if cos.shape[2] != Qn.shape[2]:
+        cos = cos[:, :, -Qn.shape[2]:, :]
+        sin = sin[:, :, -Qn.shape[2]:, :]
+
     h = self.half_head_dim
 
-    RH_Q = self.RH_Q
+    RH_Q = self.RH_Q[:, :, :1, :]
     RH_Q[:, :, :, :h] = Qn[:, :, :, h:]
     RH_Q[:, :, :, h:] = Qn[:, :, :, :h]
     RH_Q[:, :, :, :h].neg_()  # torch.neg(RH_Q[:,:,:,:h], out = RH_Q[:,:,:,:h])
     Qn *= cos
     Qn.addcmul_(RH_Q, sin)
 
-    RH_K = RH_Q[
-        :, :n_kv_heads, :, :
-    ]  # torch.empty((n_kv_heads, 1, head_dim), dtype = dtype, device = "cuda:0")
+    RH_K = RH_Q[:, :n_kv_heads, :, :]
     RH_K[:, :, :, :h] = Kn[:, :, :, h:]
     RH_K[:, :, :, h:] = Kn[:, :, :, :h]
     RH_K[:, :, :, :h].neg_()  # torch.neg(RH_K[:,:,:,:h], out = RH_K[:,:,:,:h])
@@ -1586,7 +1589,7 @@ def CausalLM_fast_forward(fast_forward_inference):
             shift_logits = logits
             # if not hasattr(self, "extra_ignored_labels"):
             #     # Fixes https://github.com/unslothai/unsloth/issues/10
-            #     self.extra_ignored_labels = torch.full((self.max_seq_length, 1), -100, device = "cuda:0")
+            # self.extra_ignored_labels = torch.full((self.max_seq_length, 1), -100, device = f"{DEVICE_TYPE_TORCH}:0")
             # pass
             shift_labels = torch.empty_like(labels)
             shift_labels[..., :-1] = labels[..., 1:]
@@ -2232,6 +2235,9 @@ class FastLlamaModel:
                     fast_inference = False
             elif DEVICE_TYPE == "hip":
                 fast_inference = True
+            elif DEVICE_TYPE == "mps":
+                print("Unsloth: vLLM does not work on MPS - will switch to Unsloth inference!")
+                fast_inference = False
             if (
                 unsloth_vllm_standby
                 and os.environ.get("UNSLOTH_VLLM_STANDBY", "0") == "0"
@@ -2256,6 +2262,7 @@ class FastLlamaModel:
                 vllm_version = f" vLLM: {importlib_version('vllm')}."
             except:
                 vllm_version = ""
+            max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
         elif DEVICE_TYPE == "hip":
             gpu_stats = torch.cuda.get_device_properties(0)
             gpu_stats_name = resolve_hip_gpu_stats_name(gpu_stats)
@@ -2265,6 +2272,7 @@ class FastLlamaModel:
                 vllm_version = f" vLLM: {importlib_version('vllm')}."
             except:
                 vllm_version = ""
+            max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
         elif DEVICE_TYPE == "xpu":
             gpu_stats = torch.xpu.get_device_properties(0)
             gpu_stats_name = (
@@ -2276,10 +2284,14 @@ class FastLlamaModel:
                 vllm_version = f" vLLM: {importlib_version('vllm')}."
             except:
                 vllm_version = ""
+            max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
+        elif DEVICE_TYPE == "mps":
+            gpu_stats_name = "Apple Silicon. "
+            gpu_stats_snippet = ""
+            vllm_version = ""
+            max_memory = round(psutil.virtual_memory().total / 1024 / 1024 / 1024, 3)
         else:
             raise ValueError(f"Unsloth: Unsupported device type: {DEVICE_TYPE}")
-
-        max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
 
         statistics = (
             f"==((====))==  Unsloth {__version__}: Fast {model_patcher.__name__[4:-5]} patching. Transformers: {transformers_version}.{vllm_version}\n"
@@ -2561,12 +2573,10 @@ class FastLlamaModel:
         f' "-____-"     Trainable parameters = {get_model_param_count(model, trainable_only=True):,} of {get_model_param_count(model):,} ({get_model_param_count(model, trainable_only=True)/get_model_param_count(model)*100:.2f}% trained)'
         logger.warning(debug_info)
         import gc
+        from unsloth.device_type import clean_gpu_cache
         for _ in range(3):
             gc.collect()
-            if DEVICE_TYPE == "xpu":
-                torch.xpu.empty_cache()
-            else:
-                torch.cuda.empty_cache()"""
+            clean_gpu_cache()"""
 
         debug_info = debug_info.split("\n")
         debug_info = "\n".join(

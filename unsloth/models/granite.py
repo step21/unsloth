@@ -624,8 +624,9 @@ class FastGraniteModel(FastLlamaModel):
 
         # Clear deleted GPU items
         import gc
+        from ..device_type import clean_gpu_cache
 
         for _ in range(3):
             gc.collect()
-            torch.cuda.empty_cache()
+            clean_gpu_cache()
         return model, tokenizer

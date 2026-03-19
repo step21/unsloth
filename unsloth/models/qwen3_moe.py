@@ -66,7 +66,7 @@ def Qwen3MoeSparseMoeBlock_fast_forward(self, X, temp_gate = None, temp_up = Non
     routing_weights /= routing_weights.sum(dim = -1, keepdim = True)
     # we cast back to the input dtype
     routing_weights = routing_weights.to(X.dtype)
-    final_X = torch.zeros((bsz * seq_len, hd), dtype = torch.float32, device = X.device)
+    final_X = torch.zeros((bsz * seq_len, hd), dtype = X.dtype, device = X.device)
 
     # One hot encode the selected experts to create an expert mask
     # this will be used to easily index which expert is going to be sollicitated

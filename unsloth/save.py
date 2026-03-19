@@ -50,6 +50,10 @@ import subprocess
 import psutil
 import re
 from transformers.models.llama.modeling_llama import logger
+from .device_type import (
+    clean_gpu_cache,
+    is_bf16_supported,
+)
 from .tokenizer_utils import fix_sentencepiece_gguf
 from .models.loader_utils import get_model_name
 from .models._utils import _convert_torchao_model
@@ -320,7 +324,7 @@ def unsloth_save_model(
 
     # Clean memory up first
     for _ in range(3):
-        torch.cuda.empty_cache()
+        clean_gpu_cache()
         gc.collect()
 
     save_method = save_method.lower().replace(" ", "_")
@@ -639,9 +643,18 @@ def unsloth_save_model(
         internal_model.model.embed_tokens.weight.data.to(torch_dtype)
     )
 
-    max_vram = int(
-        torch.cuda.get_device_properties(0).total_memory * maximum_memory_usage
-    )
+    from .device_type import get_device_type, get_current_device
+    if get_device_type() == "cuda":
+        max_vram = int(
+            torch.cuda.get_device_properties(get_current_device()).total_memory * maximum_memory_usage
+        )
+    elif get_device_type() == "xpu":
+        max_vram = int(
+            torch.xpu.get_device_properties(get_current_device()).total_memory * maximum_memory_usage
+        )
+    else:
+        # MPS or CPU
+        max_vram = int(psutil.virtual_memory().available * maximum_memory_usage)
 
     print("Unsloth: Saving model... This might take 5 minutes ...")
 
@@ -657,7 +670,20 @@ def unsloth_save_model(
             if bias is not None:
                 state_dict[f"model.layers.{j}.{item}.bias"] = bias
 
-            if (torch.cuda.memory_allocated() + W.nbytes) < max_vram:
+            # Memory check
+            from .device_type import get_device_type
+            _device_type = get_device_type()
+            if _device_type == "cuda":
+                mem_used = torch.cuda.memory_allocated()
+            elif _device_type == "xpu":
+                mem_used = torch.xpu.memory_allocated()
+            elif _device_type == "mps":
+                # torch.mps.current_allocated_memory() is available in newer PyTorch
+                mem_used = getattr(torch.mps, "current_allocated_memory", lambda: 0)()
+            else:
+                mem_used = 0
+
+            if (mem_used + W.nbytes) < max_vram:
                 # Save to GPU memory
                 state_dict[name] = W
             # [TODO] Saving to RAM seems to leak memory???
@@ -854,11 +880,11 @@ def unsloth_save_model(
     for j, (key, value) in enumerate(state_dict.items()):
         state_dict[key] = None
         if j % 10 == 0:
-            torch.cuda.empty_cache()
+            clean_gpu_cache()
             gc.collect()
     state_dict = None
     del state_dict
-    torch.cuda.empty_cache()
+    clean_gpu_cache()
     gc.collect()
 
     # Remove temporary location
@@ -867,7 +893,7 @@ def unsloth_save_model(
     shutil.rmtree(temporary_location, ignore_errors = True)
 
     for _ in range(3):
-        torch.cuda.empty_cache()
+        clean_gpu_cache()
         gc.collect()
     return save_directory, username
 
@@ -1122,7 +1148,7 @@ def save_to_gguf(
         )
 
     # Check if bfloat16 is supported
-    if model_dtype == "bf16" and not torch.cuda.is_bf16_supported():
+    if model_dtype == "bf16" and not is_bf16_supported():
         logger.warning(
             "Unsloth: Cannot convert to bf16 GGUF since your computer doesn't support it.\n"
             "We shall switch instead to f16."
@@ -1196,7 +1222,7 @@ def save_to_gguf(
                     first_conversion = "bf16"  # requantizing from q8_0 disallowed in new llama.cpp default to bf16.
 
     # Check bfloat16 support again for first_conversion
-    if first_conversion == "bf16" and not torch.cuda.is_bf16_supported():
+    if first_conversion == "bf16" and not is_bf16_supported():
         logger.warning("Unsloth: Switching bf16 to f16 due to hardware limitations")
         first_conversion = "f16"
 
@@ -1998,8 +2024,7 @@ def unsloth_save_pretrained_gguf(
         import gc
 
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        clean_gpu_cache()
 
     # Step 7: Get model dtype and type
     try:

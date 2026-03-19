@@ -520,10 +520,12 @@ def fp8_fbgemm_block_linear(X, weight, weight_scale, bias = None):
 
 
 def test_has_fbgemm():
+    from unsloth.device_type import DEVICE_TYPE_TORCH
     # We must manually check if the faster FBGEMM works on the specific GPU
     # For example RTX 5090 and RTX 4090 does not work
     # Also SM100 (Blackwell B200/B100) GPUs fail with CUTLASS SM90 kernels
     # [TODO] Investigate with TorchAO why FBGEMM fails on consumer GPUs
+    if DEVICE_TYPE_TORCH != "cuda": return False
     M, N, K = 128, 128, 128
     xq = torch.ones(M, K, dtype = torch.float8_e4m3fn, device = "cuda")
     wq = xq
@@ -563,7 +565,8 @@ def test_has_fbgemm():
             )
         has_fbgemm = False
     del block_scale, xq
-    torch.cuda.empty_cache()
+    from unsloth.device_type import clean_gpu_cache
+    clean_gpu_cache()
     return has_fbgemm
 
 

@@ -69,6 +69,11 @@ triton = [
     "triton-windows ; (sys_platform == 'win32') and (platform_machine == 'AMD64' or platform_machine == 'x86_64')",
 ]
 
+mps = [
+    "unsloth[huggingfacenotorch]",
+    "torchao>=0.9.0",
+]
+
 huggingfacenotorch = [
     "wheel>=0.42.0",
     "packaging",

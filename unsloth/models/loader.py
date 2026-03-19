@@ -349,9 +349,10 @@ class FastLanguageModel(FastLlamaModel):
                     "You can do this in a terminal via `pip install vllm`"
                 )
             if DEVICE_TYPE_TORCH == "cuda":
+                from ..device_type import get_device_name
                 for i in range(DEVICE_COUNT):
                     # [TODO] DGX Spark vLLM breaks
-                    if "NVIDIA GB10" in str(torch.cuda.get_device_name(i)).upper():
+                    if "NVIDIA GB10" in str(get_device_name(i)).upper():
                         print(
                             "Unsloth: DGX Spark detected - `fast_inference=True` is currently broken as of January 2026.\n"
                             "Defaulting to native Unsloth inference."
@@ -359,12 +360,25 @@ class FastLanguageModel(FastLlamaModel):
                         fast_inference = False
                         break
 
-        # Check if 4bit is allowed specifically for AMD
-        if not ALLOW_BITSANDBYTES and not use_exact_model_name:
+        # Check if 4bit is allowed specifically for AMD and Apple Silicon
+        if DEVICE_TYPE == "mps" and (load_in_4bit or load_in_8bit):
+            if importlib.util.find_spec("torchao") is not None:
+                print("Unsloth: Apple Silicon detected. Preferring `torchao` for quantization.")
+                # We'll use torchao for quantization on Apple Silicon
+                if load_in_4bit:
+                    load_in_fp8 = "int4_weight_only"
+                    load_in_4bit = False
+                elif load_in_8bit:
+                    load_in_fp8 = "int8_weight_only"
+                    load_in_8bit = False
+            elif not ALLOW_BITSANDBYTES:
+                print("Unsloth: Apple Silicon currently does not support bitsandbytes and torchao is missing. Disabling 4-bit/8-bit for now.")
+                load_in_4bit = False
+                load_in_8bit = False
+
+        if not ALLOW_BITSANDBYTES and not use_exact_model_name and DEVICE_TYPE != "mps":
             if load_in_4bit or load_in_8bit or model_name.lower().endswith("-bnb-4bit"):
-                print(
-                    "Unsloth: AMD currently is not stable with 4bit bitsandbytes. Disabling for now."
-                )
+                print("Unsloth: AMD currently is not stable with 4bit bitsandbytes. Disabling for now.")
             load_in_4bit = False
 
         # Find FP8, BnB 4bit, other mapped names
@@ -961,12 +975,25 @@ class FastModel(FastBaseModel):
             if is_dist:
                 device_map = distributed_device_map
 
-        # Check if 4bit is allowed specifically for AMD
-        if not ALLOW_BITSANDBYTES and not use_exact_model_name:
+        # Check if 4bit is allowed specifically for AMD and Apple Silicon
+        if DEVICE_TYPE == "mps" and (load_in_4bit or load_in_8bit):
+            if importlib.util.find_spec("torchao") is not None:
+                print("Unsloth: Apple Silicon detected. Preferring `torchao` for quantization.")
+                # We'll use torchao for quantization on Apple Silicon
+                if load_in_4bit:
+                    load_in_fp8 = "int4_weight_only"
+                    load_in_4bit = False
+                elif load_in_8bit:
+                    load_in_fp8 = "int8_weight_only"
+                    load_in_8bit = False
+            elif not ALLOW_BITSANDBYTES:
+                print("Unsloth: Apple Silicon currently does not support bitsandbytes and torchao is missing. Disabling 4-bit/8-bit for now.")
+                load_in_4bit = False
+                load_in_8bit = False
+
+        if not ALLOW_BITSANDBYTES and not use_exact_model_name and DEVICE_TYPE != "mps":
             if load_in_4bit or load_in_8bit or model_name.lower().endswith("-bnb-4bit"):
-                print(
-                    "Unsloth: AMD currently is not stable with 4bit bitsandbytes. Disabling for now."
-                )
+                print("Unsloth: AMD currently is not stable with 4bit bitsandbytes. Disabling for now.")
             load_in_4bit = False
 
         if fast_inference:
@@ -976,9 +1003,10 @@ class FastModel(FastBaseModel):
                     "You can do this in a terminal via `pip install vllm`"
                 )
             if DEVICE_TYPE_TORCH == "cuda":
+                from ..device_type import get_device_name
                 for i in range(DEVICE_COUNT):
                     # [TODO] DGX Spark vLLM breaks
-                    if "NVIDIA GB10" in str(torch.cuda.get_device_name(i)).upper():
+                    if "NVIDIA GB10" in str(get_device_name(i)).upper():
                         print(
                             "Unsloth: DGX Spark detected - `fast_inference=True` is currently broken as of January 2026.\n"
                             "Defaulting to native Unsloth inference."

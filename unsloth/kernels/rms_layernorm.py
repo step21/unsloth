@@ -159,6 +159,21 @@ def _gemma_rms_layernorm_forward(
     tl.store(Y + col_offsets, output, mask = mask)
 
 
+from ..device_type import is_mps
+
+
+def torch_rms_layernorm(X, W, eps, gemma = False):
+    orig_dtype = X.dtype
+    X = X.to(torch.float32)
+    W = W.to(torch.float32)
+    norm_x = torch.mean(X * X, dim = -1, keepdim = True)
+    x_normed = X * torch.rsqrt(norm_x + eps)
+    if gemma:
+        return (x_normed * (W + 1.0)).to(orig_dtype)
+    else:
+        return (x_normed * W).to(orig_dtype)
+
+
 class Fast_RMS_Layernorm(torch.autograd.Function):
     @staticmethod
     def forward(ctx, X: torch.Tensor, W: torch.Tensor, eps: float, gemma: bool = False):
@@ -243,6 +258,8 @@ def fast_rms_layernorm(layernorm, X: torch.Tensor, gemma: bool = False):
         if hasattr(layernorm, "variance_epsilon")
         else layernorm.eps
     )
+    if is_mps():
+        return torch_rms_layernorm(X, W, eps, gemma)
     out = Fast_RMS_Layernorm.apply(X, W, eps, gemma)
     return out
 
@@ -304,17 +321,19 @@ def test_rms_layernorm(
     seqlen = 3341,
 ):
     from transformers.models.llama.modeling_llama import LlamaRMSNorm
+    from unsloth.device_type import DEVICE_TYPE_TORCH
 
-    layernorm = LlamaRMSNorm((dim,), eps = eps).to("cuda")
-    torch.cuda.manual_seed(random_state)
+    layernorm = LlamaRMSNorm((dim,), eps = eps).to(DEVICE_TYPE_TORCH)
+    if DEVICE_TYPE_TORCH == "cuda":
+        torch.cuda.manual_seed(random_state)
     torch.manual_seed(random_state)
     torch.nn.init.uniform_(layernorm.weight)
-    X = torch.randn((bsz, seqlen, dim), dtype = dtype, device = "cuda")
+    X = torch.randn((bsz, seqlen, dim), dtype = dtype, device = DEVICE_TYPE_TORCH)
     XX = X.clone()
     X.requires_grad_(True)
     XX.requires_grad_(True)
     Y = layernorm(X)
-    YY = torch.randn((bsz, seqlen, dim), dtype = dtype, device = "cuda", requires_grad = True)
+    YY = torch.randn((bsz, seqlen, dim), dtype = dtype, device = DEVICE_TYPE_TORCH, requires_grad = True)
     Y.backward(YY)
     correct_grad = X.grad.clone()
     # from unsloth.kernels import fast_rms_layernorm
@@ -324,9 +343,10 @@ def test_rms_layernorm(
 
 
 def testing_suite_layernorm():
+    from unsloth.device_type import DEVICE_TYPE_TORCH
     for dim in [512, 1024, 2048]:
         for dtype in [torch.float16, torch.bfloat16]:
-            with torch.autocast(device_type = "cuda", dtype = dtype):
+            with torch.autocast(device_type = DEVICE_TYPE_TORCH, dtype = dtype):
                 for seqlen in [3341, 2048, 349]:
                     for random_state in [3407, 42]:
                         test_rms_layernorm(

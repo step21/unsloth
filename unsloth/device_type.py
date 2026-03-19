@@ -20,6 +20,12 @@ __all__ = [
     "DEVICE_COUNT",
     "ALLOW_PREQUANTIZED_MODELS",
     "ALLOW_BITSANDBYTES",
+    "is_mps",
+    "clean_gpu_cache",
+    "device_synchronize",
+    "get_current_device",
+    "is_bf16_supported",
+    "get_device_name",
 ]
 
 import torch
@@ -34,6 +40,11 @@ def is_hip():
 
 
 @functools.cache
+def is_mps():
+    return bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+
+
+@functools.cache
 def get_device_type():
     if hasattr(torch, "cuda") and torch.cuda.is_available():
         if is_hip():
@@ -41,6 +52,8 @@ def get_device_type():
         return "cuda"
     elif hasattr(torch, "xpu") and torch.xpu.is_available():
         return "xpu"
+    elif is_mps():
+        return "mps"
     # Check torch.accelerator
     if hasattr(torch, "accelerator"):
         if not torch.accelerator.is_available():
@@ -78,6 +91,61 @@ def get_device_count():
 
 DEVICE_COUNT: int = get_device_count()
 
+
+def clean_gpu_cache():
+    if DEVICE_TYPE in ("cuda", "hip"):
+        torch.cuda.empty_cache()
+    elif DEVICE_TYPE == "xpu":
+        torch.xpu.empty_cache()
+    elif DEVICE_TYPE == "mps":
+        if hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
+
+
+def device_synchronize(device = None):
+    if DEVICE_TYPE in ("cuda", "hip"):
+        torch.cuda.synchronize(device)
+    elif DEVICE_TYPE == "xpu":
+        torch.xpu.synchronize(device)
+    elif DEVICE_TYPE == "mps":
+        if hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
+            torch.mps.synchronize()
+
+
+def get_current_device():
+    if DEVICE_TYPE in ("cuda", "hip"):
+        return torch.cuda.current_device()
+    elif DEVICE_TYPE == "xpu":
+        return torch.xpu.current_device()
+    elif DEVICE_TYPE == "mps":
+        return "mps"
+    else:
+        return "cpu"
+
+
+def is_bf16_supported():
+    if DEVICE_TYPE in ("cuda", "hip"):
+        return torch.cuda.is_bf16_supported()
+    elif DEVICE_TYPE == "xpu":
+        return torch.xpu.is_bf16_supported()
+    elif DEVICE_TYPE == "mps":
+        # M1+ supports bf16
+        if hasattr(torch.backends.mps, "is_built"):
+            return torch.backends.mps.is_built()
+        return False
+    return False
+
+
+def get_device_name(device = None):
+    if DEVICE_TYPE in ("cuda", "hip"):
+        return torch.cuda.get_device_name(device)
+    elif DEVICE_TYPE == "xpu":
+        return torch.xpu.get_device_name(device)
+    elif DEVICE_TYPE == "mps":
+        return "Apple Silicon"
+    else:
+        return "CPU"
+
 # 4-bit quantization requires a block size of 64
 # | Device Type     | Warp Size | Block Size |
 # |-----------------|-----------|------------|
@@ -96,6 +164,8 @@ DEVICE_COUNT: int = get_device_count()
 ALLOW_PREQUANTIZED_MODELS: bool = True
 # HSA_STATUS_ERROR_EXCEPTION checks - sometimes AMD fails for BnB
 ALLOW_BITSANDBYTES: bool = True
+if DEVICE_TYPE == "mps":
+    ALLOW_BITSANDBYTES = False
 if DEVICE_TYPE == "hip":
     try:
         import bitsandbytes

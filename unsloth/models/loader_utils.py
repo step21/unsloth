@@ -29,7 +29,7 @@ from .mapper import (
 
 # https://github.com/huggingface/transformers/pull/26037 allows 4 bit loading!
 from transformers import __version__ as transformers_version
-from unsloth.models._utils import TorchAOConfig
+from unsloth.models._utils import TorchAOConfig, clean_gpu_cache
 from unsloth_zoo.utils import Version
 import gc
 
@@ -94,6 +94,9 @@ def prepare_device_map():
             torch.cuda.set_device(local_rank)
         elif DEVICE_TYPE_TORCH == "xpu" and hasattr(torch, "xpu"):
             torch.xpu.set_device(local_rank)
+        elif DEVICE_TYPE_TORCH == "mps":
+            # MPS doesn't have multiple devices in the same way
+            pass
     except Exception:
         pass
     return device_map, True
@@ -323,7 +326,7 @@ def _offline_quantize_to_fp8(model_name: str, fp8_mode: str) -> str:
         model.save_pretrained(new_model_name, safe_serialization = False)
         del model
         for _ in range(2):
-            torch.cuda.empty_cache()
+            clean_gpu_cache()
             gc.collect()
         tokenizer.save_pretrained(new_model_name)
     return new_model_name
@@ -383,10 +386,12 @@ def _get_fp8_mode_and_check_settings(
         )
 
     # Check if this is Hopper or above
-    if not (
+    if DEVICE_TYPE_TORCH == "mps":
+        pass # Allow MPS
+    elif not (
         torch.cuda.is_available()
         and torch.version.cuda
-        and torch.cuda.get_device_capability() >= (9, 0)
+        and (hasattr(torch.cuda, "get_device_capability") and torch.cuda.get_device_capability() >= (9, 0))
     ):
         raise ValueError(
             "Unsloth: On the fly `load_in_fp8` requires H100 GPUs or after. Try `unsloth/Qwen3-8B` instead."

@@ -335,7 +335,7 @@ def install_python_stack() -> int:
     )
 
     # 5. Triton kernels (no-deps, from source)
-    if not IS_WINDOWS:
+    if not IS_WINDOWS and sys.platform != "darwin":
         _progress("triton kernels")
         pip_install(
             "Installing triton kernels",

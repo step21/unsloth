@@ -407,7 +407,7 @@ def Gemma2Attention_fast_forward_inference(
 
     RH_K = RH_Q[
         :, :n_kv_heads, :, :
-    ]  # torch.empty((n_kv_heads, 1, head_dim), dtype = dtype, device = "cuda:0")
+    ]  # torch.empty((n_kv_heads, 1, head_dim), dtype = dtype, device = f"{DEVICE_TYPE_TORCH}:0")
     RH_K[:, :, :, :h] = Kn[:, :, :, h:]
     RH_K[:, :, :, h:] = Kn[:, :, :, :h]
     RH_K[:, :, :, :h].neg_()
@@ -652,8 +652,9 @@ class FastGemma2Model(FastLlamaModel):
 
         # Clear deleted GPU items
         import gc
+        from ..device_type import clean_gpu_cache
 
         for _ in range(3):
             gc.collect()
-            torch.cuda.empty_cache()
+            clean_gpu_cache()
         return model, tokenizer
