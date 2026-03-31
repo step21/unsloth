@@ -12,8 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import triton
-import triton.language as tl
+try:
+    import triton
+    import triton.language as tl
+    _HAS_TRITON = True
+except ImportError:
+    _HAS_TRITON = False
+
 import torch
 from .utils import calculate_settings, torch_gpu_device
 from ..device_type import is_mps
@@ -25,36 +30,37 @@ BLOCK_SIZE = 1024
 INT32_SAFETY_BUFFER = NUM_INT32_ELEMENTS - BLOCK_SIZE * SAFE_INT32_BUFFER_MULTIPLIER
 
 
-@triton.jit
-def _fg_kernel(
-    e,
-    g,
-    h,
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
-    LONG_INDEXING: tl.constexpr,
-):
-    block_idx = tl.program_id(0)
-    if LONG_INDEXING:
-        offsets = block_idx.to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE).to(
-            tl.int64
-        )
-        n_elements = tl.cast(n_elements, tl.int64)
-    else:
-        offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
+if _HAS_TRITON:
+    @triton.jit
+    def _fg_kernel(
+        e,
+        g,
+        h,
+        n_elements,
+        BLOCK_SIZE: tl.constexpr,
+        LONG_INDEXING: tl.constexpr,
+    ):
+        block_idx = tl.program_id(0)
+        if LONG_INDEXING:
+            offsets = block_idx.to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE).to(
+                tl.int64
+            )
+            n_elements = tl.cast(n_elements, tl.int64)
+        else:
+            offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
 
-    e_row = tl.load(e + offsets, mask = mask, other = 0).to(tl.float32)
-    g_row = tl.load(g + offsets, mask = mask, other = 0)  # .to(tl.float32)
+        e_row = tl.load(e + offsets, mask = mask, other = 0).to(tl.float32)
+        g_row = tl.load(g + offsets, mask = mask, other = 0)  # .to(tl.float32)
 
-    # f = e * sigmoid(e)
-    f_row = e_row * tl.sigmoid(e_row)  # e_row / (1 + tl.exp(-e_row))
-    f_row = f_row.to(g_row.dtype)  # Exact copy from HF
-    # h = f * g
-    h_row = f_row * g_row
+        # f = e * sigmoid(e)
+        f_row = e_row * tl.sigmoid(e_row)  # e_row / (1 + tl.exp(-e_row))
+        f_row = f_row.to(g_row.dtype)  # Exact copy from HF
+        # h = f * g
+        h_row = f_row * g_row
 
-    # Store h
-    tl.store(h + offsets, h_row, mask = mask)
+        # Store h
+        tl.store(h + offsets, h_row, mask = mask)
 
 
 def torch_swiglu_fg(e, g):
@@ -81,58 +87,59 @@ def swiglu_fg_kernel(e, g):
     return h
 
 
-@triton.jit
-def _DWf_DW_dfg_kernel(
-    DW,
-    e,
-    g,
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
-    LONG_INDEXING: tl.constexpr,
-):
-    """
-    e = e.float()
-    se = 1.0 / (1.0 + torch.exp(-e))
-    f = (se * e).to(dtype)
-    h = f * g
-    df = DW * f
-    dg = DW * g
-    de = (dg.float() * se * (1.0 + e * (1.0 - se))).to(dtype)
-    """
-    block_idx = tl.program_id(0)
-    if LONG_INDEXING:
-        offsets = block_idx.to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE).to(
-            tl.int64
-        )
-        n_elements = tl.cast(n_elements, tl.int64)
-    else:
-        offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
+if _HAS_TRITON:
+    @triton.jit
+    def _DWf_DW_dfg_kernel(
+        DW,
+        e,
+        g,
+        n_elements,
+        BLOCK_SIZE: tl.constexpr,
+        LONG_INDEXING: tl.constexpr,
+    ):
+        """
+        e = e.float()
+        se = 1.0 / (1.0 + torch.exp(-e))
+        f = (se * e).to(dtype)
+        h = f * g
+        df = DW * f
+        dg = DW * g
+        de = (dg.float() * se * (1.0 + e * (1.0 - se))).to(dtype)
+        """
+        block_idx = tl.program_id(0)
+        if LONG_INDEXING:
+            offsets = block_idx.to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE).to(
+                tl.int64
+            )
+            n_elements = tl.cast(n_elements, tl.int64)
+        else:
+            offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
 
-    DW_row = tl.load(DW + offsets, mask = mask, other = 0)  # .to(tl.float32)
-    e_row = tl.load(e + offsets, mask = mask, other = 0).to(tl.float32)
-    g_row = tl.load(g + offsets, mask = mask, other = 0)  # .to(tl.float32)
+        DW_row = tl.load(DW + offsets, mask = mask, other = 0)  # .to(tl.float32)
+        e_row = tl.load(e + offsets, mask = mask, other = 0).to(tl.float32)
+        g_row = tl.load(g + offsets, mask = mask, other = 0)  # .to(tl.float32)
 
-    # e = e.float()
-    # se = 1.0 / (1.0 + torch.exp(-e))
-    se_row = tl.sigmoid(e_row)  # 1.0 / (1.0 + tl.exp(-e_row))
-    # f = (se * e).to(dtype)
-    f_row = se_row * e_row
-    f_row = f_row.to(DW_row.dtype)
-    # h = f * g
-    h_row = f_row * g_row
-    # df = DW * f
-    df_row = DW_row * f_row
-    # dg = DW * g
-    dg_row = DW_row * g_row
-    # de = (dg.float() * se * (1.0 + e * (1.0 - se))).to(dtype)
-    de_row = dg_row.to(tl.float32) * se_row * (1.0 + e_row * (1.0 - se_row))
-    de_row = de_row.to(DW_row.dtype)
+        # e = e.float()
+        # se = 1.0 / (1.0 + torch.exp(-e))
+        se_row = tl.sigmoid(e_row)  # 1.0 / (1.0 + tl.exp(-e_row))
+        # f = (se * e).to(dtype)
+        f_row = se_row * e_row
+        f_row = f_row.to(DW_row.dtype)
+        # h = f * g
+        h_row = f_row * g_row
+        # df = DW * f
+        df_row = DW_row * f_row
+        # dg = DW * g
+        dg_row = DW_row * g_row
+        # de = (dg.float() * se * (1.0 + e * (1.0 - se))).to(dtype)
+        de_row = dg_row.to(tl.float32) * se_row * (1.0 + e_row * (1.0 - se_row))
+        de_row = de_row.to(DW_row.dtype)
 
-    # Store derivatives in buffers
-    tl.store(DW + offsets, h_row, mask = mask)  # h  = f * g
-    tl.store(e + offsets, df_row, mask = mask)  # df = DW * f
-    tl.store(g + offsets, de_row, mask = mask)  # de
+        # Store derivatives in buffers
+        tl.store(DW + offsets, h_row, mask = mask)  # h  = f * g
+        tl.store(e + offsets, df_row, mask = mask)  # df = DW * f
+        tl.store(g + offsets, de_row, mask = mask)  # de
 
 
 def swiglu_DWf_DW_dfg_kernel(DW, e, g):
@@ -143,13 +150,13 @@ def swiglu_DWf_DW_dfg_kernel(DW, e, g):
         # Actually, if we are in the backward pass of a custom autograd function, we need this.
         # For now, let's provide a basic PyTorch version.
         orig_dtype = e.dtype
-        e = e.to(torch.float32)
-        se = torch.sigmoid(e)
-        f = (se * e).to(orig_dtype)
-        h = (f * g)
-        df = (DW * f)
-        dg = (DW * g)
-        de = (dg.to(torch.float32) * se * (1.0 + e * (1.0 - se))).to(orig_dtype)
+        e_fp32 = e.float()
+        se = torch.sigmoid(e_fp32)
+        f = (se * e_fp32).to(orig_dtype)
+        h = f * g.to(orig_dtype)
+        df = DW.to(orig_dtype) * f
+        dg = DW.to(orig_dtype) * g.to(orig_dtype)
+        de = (dg.float() * se * (1.0 + e_fp32 * (1.0 - se))).to(orig_dtype)
         DW.copy_(h)
         e.copy_(df)
         g.copy_(de)

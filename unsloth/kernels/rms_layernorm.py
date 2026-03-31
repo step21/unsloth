@@ -12,151 +12,154 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import triton
-import triton.language as tl
+try:
+    import triton
+    import triton.language as tl
+    _HAS_TRITON = True
+except ImportError:
+    _HAS_TRITON = False
+
 import torch
 from .utils import calculate_settings, torch_gpu_device
 
 
-@triton.jit
-def _rms_layernorm_forward(
-    Y,
-    Y_row_stride: tl.constexpr,
-    X,
-    X_row_stride: tl.constexpr,
-    W,
-    W_row_stride: tl.constexpr,
-    r,
-    r_row_stride: tl.constexpr,
-    n_cols: tl.constexpr,
-    eps: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    """
-    Fast RMS Layernorm kernel
-    Inspiration from a Triton tutorial:
-    https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
-    """
-    row_idx = tl.program_id(0)
-    col_offsets = tl.arange(0, BLOCK_SIZE)
-    mask = col_offsets < n_cols
+if _HAS_TRITON:
+    @triton.jit
+    def _rms_layernorm_forward(
+        Y,
+        Y_row_stride: tl.constexpr,
+        X,
+        X_row_stride: tl.constexpr,
+        W,
+        W_row_stride: tl.constexpr,
+        r,
+        r_row_stride: tl.constexpr,
+        n_cols: tl.constexpr,
+        eps: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        """
+        Fast RMS Layernorm kernel
+        Inspiration from a Triton tutorial:
+        https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
+        """
+        row_idx = tl.program_id(0)
+        col_offsets = tl.arange(0, BLOCK_SIZE)
+        mask = col_offsets < n_cols
 
-    Y += row_idx * Y_row_stride
-    X += row_idx * X_row_stride
-    r += row_idx * r_row_stride
+        Y += row_idx * Y_row_stride
+        X += row_idx * X_row_stride
+        r += row_idx * r_row_stride
 
-    X_row = tl.load(X + col_offsets, mask = mask, other = 0).to(tl.float32)
-    W_row = tl.load(W + col_offsets, mask = mask, other = 0)  # .to(tl.float32)
+        X_row = tl.load(X + col_offsets, mask = mask, other = 0).to(tl.float32)
+        W_row = tl.load(W + col_offsets, mask = mask, other = 0)  # .to(tl.float32)
 
-    row_var = tl.sum(X_row * X_row, axis = 0) / n_cols
-    # Explicit float32 scalar to ensure correct type promotion on HIP/ROCm
-    eps_f32 = tl.full((), eps, tl.float32)
-    inv_var = tl.math.rsqrt(row_var + eps_f32)
-    tl.store(r, inv_var)
-    normed = X_row * inv_var
-    normed = normed.to(W_row.dtype)  # Exact copy from HF
-    output = normed * W_row
-    tl.store(Y + col_offsets, output, mask = mask)
+        row_var = tl.sum(X_row * X_row, axis = 0) / n_cols
+        # Explicit float32 scalar to ensure correct type promotion on HIP/ROCm
+        eps_f32 = tl.full((), eps, tl.float32)
+        inv_var = tl.math.rsqrt(row_var + eps_f32)
+        tl.store(r, inv_var)
+        normed = X_row * inv_var
+        normed = normed.to(W_row.dtype)  # Exact copy from HF
+        output = normed * W_row
+        tl.store(Y + col_offsets, output, mask = mask)
 
+    def _rms_layernorm_backward(
+        dY,
+        dY_row_stride: tl.constexpr,
+        dX,
+        dX_row_stride: tl.constexpr,
+        X,
+        X_row_stride: tl.constexpr,
+        W,
+        W_row_stride: tl.constexpr,
+        r,
+        r_row_stride: tl.constexpr,
+        # dW, dW_row_stride,
+        n_cols: tl.constexpr,
+        eps: tl.constexpr,
+        GEMMA: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        """
+        Fast RMS Layernorm kernel for the backward pass
+        Inspiration from a Triton tutorial:
+        https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
+        """
+        row_idx = tl.program_id(0)
+        col_offsets = tl.arange(0, BLOCK_SIZE)
+        mask = col_offsets < n_cols
 
-def _rms_layernorm_backward(
-    dY,
-    dY_row_stride: tl.constexpr,
-    dX,
-    dX_row_stride: tl.constexpr,
-    X,
-    X_row_stride: tl.constexpr,
-    W,
-    W_row_stride: tl.constexpr,
-    r,
-    r_row_stride: tl.constexpr,
-    # dW, dW_row_stride,
-    n_cols: tl.constexpr,
-    eps: tl.constexpr,
-    GEMMA: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    """
-    Fast RMS Layernorm kernel for the backward pass
-    Inspiration from a Triton tutorial:
-    https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
-    """
-    row_idx = tl.program_id(0)
-    col_offsets = tl.arange(0, BLOCK_SIZE)
-    mask = col_offsets < n_cols
+        dY += row_idx * dY_row_stride
+        X += row_idx * X_row_stride
+        r += row_idx * r_row_stride
 
-    dY += row_idx * dY_row_stride
-    X += row_idx * X_row_stride
-    r += row_idx * r_row_stride
+        if GEMMA:
+            dX += row_idx * dY_row_stride
+        else:
+            dX = dY
 
-    if GEMMA:
-        dX += row_idx * dY_row_stride
-    else:
-        dX = dY
+        dY_row = tl.load(dY + col_offsets, mask = mask, other = 0).to(tl.float32)
+        X_row = tl.load(X + col_offsets, mask = mask, other = 0).to(tl.float32)
+        W_row = tl.load(W + col_offsets, mask = mask, other = 0).to(tl.float32)
 
-    dY_row = tl.load(dY + col_offsets, mask = mask, other = 0).to(tl.float32)
-    X_row = tl.load(X + col_offsets, mask = mask, other = 0).to(tl.float32)
-    W_row = tl.load(W + col_offsets, mask = mask, other = 0).to(tl.float32)
+        # Get saved row variance
+        inv_var = tl.load(r).to(tl.float32)
+        normed = X_row * inv_var
 
-    # Get saved row variance
-    inv_var = tl.load(r).to(tl.float32)
-    normed = X_row * inv_var
+        if GEMMA:
+            dY_W = dY_row * (W_row + 1.0)
+        else:
+            dY_W = dY_row * W_row
 
-    if GEMMA:
-        dY_W = dY_row * (W_row + 1.0)
-    else:
-        dY_W = dY_row * W_row
+        rowsum_dY_normed = tl.sum(dY_W * normed, axis = 0)
+        output = inv_var / n_cols * (n_cols * dY_W - normed * rowsum_dY_normed)
+        tl.store(dX + col_offsets, output, mask = mask)
 
-    rowsum_dY_normed = tl.sum(dY_W * normed, axis = 0)
-    output = inv_var / n_cols * (n_cols * dY_W - normed * rowsum_dY_normed)
-    tl.store(dX + col_offsets, output, mask = mask)
+    _rms_layernorm_backward = triton.jit(_rms_layernorm_backward)
+    _rms_layernorm_backward = triton.heuristics(
+        {
+            "GEMMA": lambda args: bool(args["GEMMA"]),
+        }
+    )(_rms_layernorm_backward)
 
+    @triton.jit
+    def _gemma_rms_layernorm_forward(
+        Y,
+        Y_row_stride: tl.constexpr,
+        X,
+        X_row_stride: tl.constexpr,
+        W,
+        W_row_stride: tl.constexpr,
+        r,
+        r_row_stride: tl.constexpr,
+        n_cols: tl.constexpr,
+        eps: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        # Copies https://github.com/google-deepmind/gemma/blob/main/gemma/layers.py#L31
+        # and https://github.com/keras-team/keras-nlp/blob/v0.8.2/keras_nlp/models/gemma/rms_normalization.py#L33
+        # exactly. Essentially all in float32!
+        row_idx = tl.program_id(0)
+        col_offsets = tl.arange(0, BLOCK_SIZE)
+        mask = col_offsets < n_cols
 
-_rms_layernorm_backward = triton.jit(_rms_layernorm_backward)
-_rms_layernorm_backward = triton.heuristics(
-    {
-        "GEMMA": lambda args: bool(args["GEMMA"]),
-    }
-)(_rms_layernorm_backward)
+        Y += row_idx * Y_row_stride
+        X += row_idx * X_row_stride
+        r += row_idx * r_row_stride
 
+        X_row = tl.load(X + col_offsets, mask = mask, other = 0).to(tl.float32)
+        W_row = tl.load(W + col_offsets, mask = mask, other = 0).to(tl.float32)
 
-@triton.jit
-def _gemma_rms_layernorm_forward(
-    Y,
-    Y_row_stride: tl.constexpr,
-    X,
-    X_row_stride: tl.constexpr,
-    W,
-    W_row_stride: tl.constexpr,
-    r,
-    r_row_stride: tl.constexpr,
-    n_cols: tl.constexpr,
-    eps: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    # Copies https://github.com/google-deepmind/gemma/blob/main/gemma/layers.py#L31
-    # and https://github.com/keras-team/keras-nlp/blob/v0.8.2/keras_nlp/models/gemma/rms_normalization.py#L33
-    # exactly. Essentially all in float32!
-    row_idx = tl.program_id(0)
-    col_offsets = tl.arange(0, BLOCK_SIZE)
-    mask = col_offsets < n_cols
+        row_var = tl.sum(X_row * X_row, axis = 0) / n_cols
+        # Explicit float32 scalar to ensure correct type promotion on HIP/ROCm
+        eps_f32 = tl.full((), eps, tl.float32)
+        inv_var = tl.math.rsqrt(row_var + eps_f32)
+        tl.store(r, inv_var)
+        normed = X_row * inv_var
+        output = normed * (W_row + 1.0)
 
-    Y += row_idx * Y_row_stride
-    X += row_idx * X_row_stride
-    r += row_idx * r_row_stride
-
-    X_row = tl.load(X + col_offsets, mask = mask, other = 0).to(tl.float32)
-    W_row = tl.load(W + col_offsets, mask = mask, other = 0).to(tl.float32)
-
-    row_var = tl.sum(X_row * X_row, axis = 0) / n_cols
-    # Explicit float32 scalar to ensure correct type promotion on HIP/ROCm
-    eps_f32 = tl.full((), eps, tl.float32)
-    inv_var = tl.math.rsqrt(row_var + eps_f32)
-    tl.store(r, inv_var)
-    normed = X_row * inv_var
-    output = normed * (W_row + 1.0)
-
-    tl.store(Y + col_offsets, output, mask = mask)
+        tl.store(Y + col_offsets, output, mask = mask)
 
 
 from ..device_type import is_mps

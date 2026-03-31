@@ -13,173 +13,178 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import triton
-import triton.language as tl
+try:
+    import triton
+    import triton.language as tl
+    _HAS_TRITON = True
+except ImportError:
+    _HAS_TRITON = False
+
 import torch
 from ..device_type import DEVICE_COUNT, is_mps
 from .utils import calculate_settings, torch_gpu_device, torch_device_stream
 
 
-def _rope_embedding_QK(
-    Q,
-    Q_batch_stride,
-    Q_head_stride,
-    Q_seq_stride,
-    K,
-    K_batch_stride,
-    K_head_stride,
-    K_seq_stride,
-    cos,
-    cos_row_stride,
-    sin,
-    sin_row_stride,
-    rope_embedding_indices,
-    seqlen,
-    head_dim: tl.constexpr,
-    n_heads_K: tl.constexpr,
-    BACKWARD_PASS: tl.constexpr,
-    HAS_ROPE_INDICES: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    row_position = tl.program_id(0)
-    head_position = tl.program_id(1)
-    col_offsets = tl.arange(0, BLOCK_SIZE)
-    half_head_dim = head_dim // 2
-    mask = col_offsets < half_head_dim
+if _HAS_TRITON:
+    def _rope_embedding_QK(
+        Q,
+        Q_batch_stride,
+        Q_head_stride,
+        Q_seq_stride,
+        K,
+        K_batch_stride,
+        K_head_stride,
+        K_seq_stride,
+        cos,
+        cos_row_stride,
+        sin,
+        sin_row_stride,
+        rope_embedding_indices,
+        seqlen,
+        head_dim: tl.constexpr,
+        n_heads_K: tl.constexpr,
+        BACKWARD_PASS: tl.constexpr,
+        HAS_ROPE_INDICES: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        row_position = tl.program_id(0)
+        head_position = tl.program_id(1)
+        col_offsets = tl.arange(0, BLOCK_SIZE)
+        half_head_dim = head_dim // 2
+        mask = col_offsets < half_head_dim
 
-    if HAS_ROPE_INDICES:
-        rot_position = tl.load(
-            rope_embedding_indices + row_position,
-            eviction_policy = "evict_first",
-        ).to(tl.int32)
-    else:
-        rot_position = row_position % seqlen
+        if HAS_ROPE_INDICES:
+            rot_position = tl.load(
+                rope_embedding_indices + row_position,
+                eviction_policy = "evict_first",
+            ).to(tl.int32)
+        else:
+            rot_position = row_position % seqlen
 
-    cos_ptr = cos + rot_position * cos_row_stride
-    sin_ptr = sin + rot_position * sin_row_stride
-    sin1 = tl.load(
-        sin_ptr + col_offsets,
-        mask = mask,
-        other = 0,
-    )
-    cos1 = tl.load(
-        cos_ptr + col_offsets,
-        mask = mask,
-        other = 0,
-    )
-    if BACKWARD_PASS:
-        sin1 = -sin1
-
-    batch_id = row_position // seqlen
-    seq_index = row_position - batch_id * seqlen
-
-    q_ptr = (
-        Q
-        + batch_id * Q_batch_stride
-        + head_position * Q_head_stride
-        + seq_index * Q_seq_stride
-    )
-    q0 = tl.load(q_ptr + col_offsets, mask = mask, other = 0)
-    q1 = tl.load(q_ptr + half_head_dim + col_offsets, mask = mask, other = 0)
-    tl.store(q_ptr + col_offsets, q0 * cos1 - q1 * sin1, mask = mask)
-    tl.store(q_ptr + half_head_dim + col_offsets, q1 * cos1 + q0 * sin1, mask = mask)
-
-    if head_position < n_heads_K:
-        k_ptr = (
-            K
-            + batch_id * K_batch_stride
-            + head_position * K_head_stride
-            + seq_index * K_seq_stride
+        cos_ptr = cos + rot_position * cos_row_stride
+        sin_ptr = sin + rot_position * sin_row_stride
+        sin1 = tl.load(
+            sin_ptr + col_offsets,
+            mask = mask,
+            other = 0,
         )
-        k0 = tl.load(k_ptr + col_offsets, mask = mask, other = 0)
-        k1 = tl.load(k_ptr + half_head_dim + col_offsets, mask = mask, other = 0)
-        tl.store(k_ptr + col_offsets, k0 * cos1 - k1 * sin1, mask = mask)
-        tl.store(k_ptr + half_head_dim + col_offsets, k1 * cos1 + k0 * sin1, mask = mask)
+        cos1 = tl.load(
+            cos_ptr + col_offsets,
+            mask = mask,
+            other = 0,
+        )
+        if BACKWARD_PASS:
+            sin1 = -sin1
 
+        batch_id = row_position // seqlen
+        seq_index = row_position - batch_id * seqlen
 
-_rope_embedding_QK = triton.jit(_rope_embedding_QK)
-_rope_embedding_QK = triton.heuristics(
-    {
-        "BACKWARD_PASS": lambda args: bool(args["BACKWARD_PASS"]),
-        "HAS_ROPE_INDICES": lambda args: bool(args["HAS_ROPE_INDICES"]),
-    }
-)(_rope_embedding_QK)
+        q_ptr = (
+            Q
+            + batch_id * Q_batch_stride
+            + head_position * Q_head_stride
+            + seq_index * Q_seq_stride
+        )
+        q0 = tl.load(q_ptr + col_offsets, mask = mask, other = 0)
+        q1 = tl.load(q_ptr + half_head_dim + col_offsets, mask = mask, other = 0)
+        tl.store(q_ptr + col_offsets, q0 * cos1 - q1 * sin1, mask = mask)
+        tl.store(q_ptr + half_head_dim + col_offsets, q1 * cos1 + q0 * sin1, mask = mask)
+
+        if head_position < n_heads_K:
+            k_ptr = (
+                K
+                + batch_id * K_batch_stride
+                + head_position * K_head_stride
+                + seq_index * K_seq_stride
+            )
+            k0 = tl.load(k_ptr + col_offsets, mask = mask, other = 0)
+            k1 = tl.load(k_ptr + half_head_dim + col_offsets, mask = mask, other = 0)
+            tl.store(k_ptr + col_offsets, k0 * cos1 - k1 * sin1, mask = mask)
+            tl.store(k_ptr + half_head_dim + col_offsets, k1 * cos1 + k0 * sin1, mask = mask)
+
+    _rope_embedding_QK = triton.jit(_rope_embedding_QK)
+    _rope_embedding_QK = triton.heuristics(
+        {
+            "BACKWARD_PASS": lambda args: bool(args["BACKWARD_PASS"]),
+            "HAS_ROPE_INDICES": lambda args: bool(args["HAS_ROPE_INDICES"]),
+        }
+    )(_rope_embedding_QK)
 
 
 ROPE_GROUP_SIZE: int = 4
 
 
-def _rope_embedding(
-    Q,
-    Q_row_stride: tl.constexpr,
-    cos,
-    cos_row_stride: tl.constexpr,
-    sin,
-    sin_row_stride: tl.constexpr,
-    seqlen,
-    head_dim: tl.constexpr,
-    n_heads: tl.constexpr,
-    BACKWARD_PASS: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    """
-    Calculates the RoPE Embedding quickly
-    RoPE is Q * cos + rotate_half(Q) * sin
-    See our blog post for more info
-    """
-    ROPE_GROUP_SIZE = 4
-    row_position = tl.program_id(0)
-    group_head_position = tl.program_id(1)
-    col_offsets = tl.arange(0, BLOCK_SIZE)
-    half_head_dim = head_dim // 2
-    mask = col_offsets < half_head_dim
+if _HAS_TRITON:
+    def _rope_embedding(
+        Q,
+        Q_row_stride: tl.constexpr,
+        cos,
+        cos_row_stride: tl.constexpr,
+        sin,
+        sin_row_stride: tl.constexpr,
+        seqlen,
+        head_dim: tl.constexpr,
+        n_heads: tl.constexpr,
+        BACKWARD_PASS: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        """
+        Calculates the RoPE Embedding quickly
+        RoPE is Q * cos + rotate_half(Q) * sin
+        See our blog post for more info
+        """
+        ROPE_GROUP_SIZE = 4
+        row_position = tl.program_id(0)
+        group_head_position = tl.program_id(1)
+        col_offsets = tl.arange(0, BLOCK_SIZE)
+        half_head_dim = head_dim // 2
+        mask = col_offsets < half_head_dim
 
-    sin1 = tl.load(
-        sin
-        + (row_position % seqlen) * sin_row_stride
-        + half_head_dim * 0
-        + col_offsets,
-        mask = mask,
-        other = 0,
-    )
-    cos1 = tl.load(
-        cos
-        + (row_position % seqlen) * cos_row_stride
-        + half_head_dim * 0
-        + col_offsets,
-        mask = mask,
-        other = 0,
-    )
-
-    if BACKWARD_PASS:
-        # See our blog post for more info.
-        sin1 = -sin1
-
-    # [TODO] Autotune ROPE_GROUP_SIZE to be 1, 2, 4, 8
-    head_start = group_head_position * ROPE_GROUP_SIZE
-    head_end = min((head_start + ROPE_GROUP_SIZE), n_heads)
-
-    # 10% Faster kernel from [HuyNguyen-hust](https://github.com/unslothai/unsloth/pull/238)
-    for k in range(head_start, head_end):
-        offs_q1 = row_position * Q_row_stride + k * head_dim + col_offsets
-        offs_q2 = (
-            row_position * Q_row_stride + k * head_dim + col_offsets + half_head_dim
+        sin1 = tl.load(
+            sin
+            + (row_position % seqlen) * sin_row_stride
+            + half_head_dim * 0
+            + col_offsets,
+            mask = mask,
+            other = 0,
+        )
+        cos1 = tl.load(
+            cos
+            + (row_position % seqlen) * cos_row_stride
+            + half_head_dim * 0
+            + col_offsets,
+            mask = mask,
+            other = 0,
         )
 
-        # For Gemma - sometimes RoPE must be done in float32 and not bfloat16
-        Q1 = tl.load(Q + offs_q1, mask = mask, other = 0).to(sin1.dtype)
-        Q2 = tl.load(Q + offs_q2, mask = mask, other = 0).to(sin1.dtype)
+        if BACKWARD_PASS:
+            # See our blog post for more info.
+            sin1 = -sin1
 
-        tl.store(Q + offs_q1, Q1 * cos1 - Q2 * sin1, mask = mask)
-        tl.store(Q + offs_q2, Q2 * cos1 + Q1 * sin1, mask = mask)
+        # [TODO] Autotune ROPE_GROUP_SIZE to be 1, 2, 4, 8
+        head_start = group_head_position * ROPE_GROUP_SIZE
+        head_end = min((head_start + ROPE_GROUP_SIZE), n_heads)
 
+        # 10% Faster kernel from [HuyNguyen-hust](https://github.com/unslothai/unsloth/pull/238)
+        for k in range(head_start, head_end):
+            offs_q1 = row_position * Q_row_stride + k * head_dim + col_offsets
+            offs_q2 = (
+                row_position * Q_row_stride + k * head_dim + col_offsets + half_head_dim
+            )
 
-_rope_embedding = triton.jit(_rope_embedding)
-_rope_embedding = triton.heuristics(
-    {
-        "BACKWARD_PASS": lambda args: bool(args["BACKWARD_PASS"]),
-    }
-)(_rope_embedding)
+            # For Gemma - sometimes RoPE must be done in float32 and not bfloat16
+            Q1 = tl.load(Q + offs_q1, mask = mask, other = 0).to(sin1.dtype)
+            Q2 = tl.load(Q + offs_q2, mask = mask, other = 0).to(sin1.dtype)
+
+            tl.store(Q + offs_q1, Q1 * cos1 - Q2 * sin1, mask = mask)
+            tl.store(Q + offs_q2, Q2 * cos1 + Q1 * sin1, mask = mask)
+
+    _rope_embedding = triton.jit(_rope_embedding)
+    _rope_embedding = triton.heuristics(
+        {
+            "BACKWARD_PASS": lambda args: bool(args["BACKWARD_PASS"]),
+        }
+    )(_rope_embedding)
 
 
 class Fast_RoPE_Embedding(torch.autograd.Function):

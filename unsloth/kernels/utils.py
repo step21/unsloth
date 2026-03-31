@@ -13,11 +13,25 @@
 # limitations under the License.
 
 import importlib
-import triton
 import ctypes
 
+try:
+    import triton
+    _HAS_TRITON = True
+except ImportError:
+    _HAS_TRITON = False
+
 MAX_FUSED_SIZE: int = 65536
-next_power_of_2 = triton.next_power_of_2
+if _HAS_TRITON:
+    next_power_of_2 = triton.next_power_of_2
+else:
+    def next_power_of_2(n):
+        if n == 0:
+            return 1
+        p = 1
+        while p < n:
+            p <<= 1
+        return p
 import functools
 from typing import Optional
 
@@ -52,24 +66,24 @@ else:
 
 
 # tl.math.tanh now is libdevice.tanh
-import triton
-import triton.language as tl
+if _HAS_TRITON:
+    import triton.language as tl
 
-if Version(triton.__version__) >= Version("3.0.0"):
-    if DEVICE_TYPE == "xpu":
-        triton_tanh = tl.extra.intel.libdevice.tanh
+    if Version(triton.__version__) >= Version("3.0.0"):
+        if DEVICE_TYPE == "xpu":
+            triton_tanh = tl.extra.intel.libdevice.tanh
+        else:
+            from triton.language.extra import libdevice
+
+            triton_tanh = libdevice.tanh
+        triton_cast = tl.cast
     else:
-        from triton.language.extra import libdevice
+        triton_tanh = tl.math.tanh
 
-        triton_tanh = libdevice.tanh
-    triton_cast = tl.cast
-else:
-    triton_tanh = tl.math.tanh
-
-    # No casting in old Triton versions
-    @triton.jit
-    def triton_cast(x, dtype):
-        return x.to(dtype)
+        # No casting in old Triton versions
+        @triton.jit
+        def triton_cast(x, dtype):
+            return x.to(dtype)
 
 
 @functools.lru_cache(1)
