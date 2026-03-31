@@ -32,6 +32,7 @@ class DeviceType(str, Enum):
     """Supported compute backends. Inherits from str so it serializes cleanly in JSON."""
 
     CUDA = "cuda"
+    MPS = "mps"
     MLX = "mlx"
     CPU = "cpu"
 
@@ -96,6 +97,17 @@ def detect_hardware() -> DeviceType:
             print(f"Hardware detected: CUDA — {device_name}")
             return DEVICE
 
+    # --- MPS: Apple Silicon via PyTorch ---
+    if is_apple_silicon() and _has_torch():
+        import torch
+
+        if torch.backends.mps.is_available():
+            DEVICE = DeviceType.MPS
+            CHAT_ONLY = False
+            chip = platform.processor() or platform.machine()
+            print(f"Hardware detected: MPS — Apple Silicon ({chip})")
+            return DEVICE
+
     # --- MLX: Apple Silicon ---
     if is_apple_silicon() and _has_mlx():
         DEVICE = DeviceType.MLX
@@ -140,6 +152,10 @@ def clear_gpu_cache():
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
+    elif device == DeviceType.MPS:
+        import torch
+
+        torch.mps.empty_cache()
     elif device == DeviceType.MLX:
         # MLX manages memory automatically; no explicit cache clear needed.
         # mlx.core has no empty_cache equivalent — gc.collect() above is enough.
@@ -178,6 +194,33 @@ def get_gpu_memory_info() -> Dict[str, Any]:
             }
         except Exception as e:
             logger.error(f"Error getting CUDA GPU info: {e}")
+            return {"available": False, "backend": device.value, "error": str(e)}
+
+    # ---- MPS path (Apple Silicon via PyTorch) ----
+    if device == DeviceType.MPS:
+        try:
+            import psutil
+            import torch
+
+            total = psutil.virtual_memory().total
+            try:
+                allocated = torch.mps.current_allocated_memory()
+            except Exception:
+                allocated = 0
+
+            return {
+                "available": True,
+                "backend": device.value,
+                "device": 0,
+                "device_name": f"Apple Silicon ({platform.processor() or platform.machine()})",
+                "total_gb": total / (1024**3),
+                "allocated_gb": allocated / (1024**3),
+                "reserved_gb": 0,
+                "free_gb": (total - allocated) / (1024**3),
+                "utilization_pct": (allocated / total) * 100 if total else 0,
+            }
+        except Exception as e:
+            logger.error(f"Error getting MPS GPU info: {e}")
             return {"available": False, "backend": device.value, "error": str(e)}
 
     # ---- MLX path (Apple Silicon) ----
@@ -280,7 +323,100 @@ def get_package_versions() -> Dict[str, Optional[str]]:
     return versions
 
 
-# ========== Live GPU Utilization (nvidia-smi) ==========
+# ========== Live GPU Utilization (nvidia-smi / MPS) ==========
+
+
+def _get_mps_utilization() -> Dict[str, Any]:
+    """
+    Return a live utilization snapshot for Apple Silicon MPS.
+
+    Uses macmon (https://github.com/vladkens/macmon) when available — it
+    exposes GPU utilization %, GPU temperature, and GPU power draw via
+    `macmon pipe -s 1 -i <ms>`.  Falls back to torch.mps + psutil when
+    macmon is not installed, in which case utilization/temperature/power
+    are None.
+
+    Memory figures come from macmon when available (system-wide unified memory,
+    which reflects the training subprocess).  Falls back to
+    torch.mps.driver_allocated_memory() (PyTorch 2.1+) / psutil for the
+    server process only, which will read 0 when training runs in a subprocess.
+    """
+    import shutil
+
+    gpu_utilization_pct = None
+    temperature_c = None
+    gpu_power_w = None
+    macmon_vram_used_gb = None
+    macmon_vram_total_gb = None
+
+    if shutil.which("macmon"):
+        try:
+            import subprocess, json
+
+            result = subprocess.run(
+                ["macmon", "pipe", "-s", "1", "-i", "100"],
+                capture_output = True,
+                text = True,
+                timeout = 3,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                sample = json.loads(result.stdout.strip().splitlines()[-1])
+                gpu_usage = sample.get("gpu_usage")
+                if isinstance(gpu_usage, list) and len(gpu_usage) >= 2:
+                    gpu_utilization_pct = round(float(gpu_usage[1]) * 100, 1)
+                temp_block = sample.get("temp", {})
+                raw_temp = temp_block.get("gpu_temp_avg")
+                if raw_temp is not None:
+                    temperature_c = round(float(raw_temp), 1)
+                raw_power = sample.get("gpu_power")
+                if raw_power is not None:
+                    gpu_power_w = round(float(raw_power), 1)
+                mem_block = sample.get("memory", {})
+                raw_ram_used = mem_block.get("ram_usage")
+                raw_ram_total = mem_block.get("ram_total")
+                if raw_ram_used is not None and raw_ram_total is not None:
+                    macmon_vram_used_gb = round(float(raw_ram_used) / (1024 ** 3), 2)
+                    macmon_vram_total_gb = round(float(raw_ram_total) / (1024 ** 3), 2)
+                else:
+                    macmon_vram_used_gb = None
+                    macmon_vram_total_gb = None
+        except Exception as e:
+            logger.debug(f"macmon query failed: {e}")
+
+    try:
+        import psutil
+        import torch
+
+        total = psutil.virtual_memory().total
+
+        if macmon_vram_used_gb is not None and macmon_vram_total_gb is not None:
+            vram_used_gb = macmon_vram_used_gb
+            vram_total_gb = macmon_vram_total_gb
+        else:
+            try:
+                vram_used = torch.mps.driver_allocated_memory()
+            except AttributeError:
+                vram_used = torch.mps.current_allocated_memory()
+            vram_used_gb = round(vram_used / (1024 ** 3), 2)
+            vram_total_gb = round(total / (1024 ** 3), 2)
+
+        vram_pct = round((vram_used_gb / vram_total_gb) * 100, 1) if vram_total_gb else None
+
+        return {
+            "available": True,
+            "backend": DeviceType.MPS.value,
+            "gpu_utilization_pct": gpu_utilization_pct,
+            "temperature_c": temperature_c,
+            "vram_used_gb": vram_used_gb,
+            "vram_total_gb": vram_total_gb,
+            "vram_utilization_pct": vram_pct,
+            "power_draw_w": gpu_power_w,
+            "power_limit_w": None,
+            "power_utilization_pct": None,
+        }
+    except Exception as e:
+        logger.warning(f"MPS utilization query failed: {e}")
+        return {"available": False, "backend": DeviceType.MPS.value}
 
 
 def get_gpu_utilization() -> Dict[str, Any]:
@@ -304,6 +440,9 @@ def get_gpu_utilization() -> Dict[str, Any]:
         power_utilization_pct – power draw / limit * 100
     """
     device = get_device()
+
+    if device == DeviceType.MPS:
+        return _get_mps_utilization()
 
     if device != DeviceType.CUDA:
         return {"available": False, "backend": device.value}

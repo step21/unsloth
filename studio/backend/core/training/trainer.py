@@ -13,7 +13,7 @@ import sys
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
-from utils.hardware import clear_gpu_cache, safe_num_proc
+from utils.hardware import clear_gpu_cache, safe_num_proc, get_device, DeviceType
 
 torch._dynamo.config.recompile_limit = 64
 from unsloth import FastLanguageModel, FastVisionModel, is_bfloat16_supported
@@ -43,6 +43,44 @@ from utils.paths import (
 from trl import SFTTrainer, SFTConfig
 
 logger = get_logger(__name__)
+
+
+# bitsandbytes optimizers that use CUDA kernels not available on MPS.
+# Mapped to their torchao-backed equivalents (transformers >= 4.51 wires
+# adamw_torch_8bit / adamw_torch_4bit to torchao.optim.AdamW8bit/AdamW4bit,
+# which are PyTorch-native and work on MPS).
+# paged_* variants use CPU memory paging — irrelevant on Apple Silicon
+# unified memory; adamw_torch_8bit is the sensible replacement.
+# lion_8bit / sgd_8bit have no torchao equivalent; fall back to adamw_torch.
+_BNB_TO_TORCHAO: dict[str, str] = {
+    "adamw_8bit":        "adamw_torch_8bit",
+    "paged_adamw_8bit":  "adamw_torch_8bit",
+    "paged_adamw_32bit": "adamw_torch_8bit",
+    "lion_8bit":         "adamw_torch",
+    "paged_lion_8bit":   "adamw_torch",
+    "sgd_8bit":          "adamw_torch",
+    "rmsprop_8bit":      "adamw_torch",
+    "lars_8bit":         "adamw_torch",
+    "lamb_8bit":         "adamw_torch",
+}
+
+
+def _resolve_optim(optim: str) -> str:
+    """Replace bitsandbytes optimizers with torchao equivalents on MPS.
+
+    torchao is a core unsloth-zoo dependency and provides AdamW8bit / AdamW4bit
+    as PyTorch-native ops that run on MPS without any extra packages.
+    bitsandbytes CUDA kernels (optimizer_update_8bit_blockwise, etc.) are not
+    implemented for MPS, so bitsandbytes-backed optimizer names must be remapped.
+    """
+    if get_device() != DeviceType.MPS or optim not in _BNB_TO_TORCHAO:
+        return optim
+    replacement = _BNB_TO_TORCHAO[optim]
+    logger.info(
+        f"MPS device: replacing optimizer '{optim}' with '{replacement}' "
+        f"(torchao-backed, MPS-native — bitsandbytes CUDA kernels not available on MPS)\n"
+    )
+    return replacement
 
 
 def _build_report_targets(training_args) -> list[str] | str:
@@ -296,7 +334,7 @@ class UnslothTrainer:
         weight_decay = training_args.get("weight_decay", 0.001)
         lr_scheduler_type = training_args.get("lr_scheduler_type", "linear")
         random_seed = training_args.get("random_seed", 3407)
-        optim_value = training_args.get("optim", "adamw_8bit")
+        optim_value = _resolve_optim(training_args.get("optim", "adamw_8bit"))
 
         config = {
             "per_device_train_batch_size": batch_size,
@@ -1477,7 +1515,7 @@ class UnslothTrainer:
 
         SNAC_MODEL_NAME = "hubertsiuzdak/snac_24khz"
         SNAC_SAMPLE_RATE = 24000
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
         max_length = self.max_seq_length or 2048
         tokenizer = self.tokenizer
 
@@ -1681,7 +1719,7 @@ class UnslothTrainer:
 
         import subprocess
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
 
         # The sparktts Python package lives in the SparkAudio/Spark-TTS GitHub repo,
         # NOT in the unsloth/Spark-TTS-0.5B HF model repo. Clone it if needed.
@@ -1916,7 +1954,7 @@ class UnslothTrainer:
         from datasets import Dataset as HFDataset
         from utils.paths import ensure_dir, tmp_root
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
 
         # Clone OuteTTS repo (same as audio_codecs._load_dac)
         import subprocess
@@ -3044,7 +3082,7 @@ class UnslothTrainer:
 
             # Add model-specific parameters
             # Use optim and lr_scheduler_type from training_args if provided, otherwise use defaults
-            optim_value = training_args.get("optim", "adamw_8bit")
+            optim_value = _resolve_optim(training_args.get("optim", "adamw_8bit"))
             lr_scheduler_type_value = training_args.get("lr_scheduler_type", "linear")
 
             if self.is_vlm or self.is_audio_vlm:
@@ -3052,7 +3090,7 @@ class UnslothTrainer:
                 label = "audio VLM" if self.is_audio_vlm else "vision"
                 logger.info(f"Configuring {label} model training parameters\n")
                 # Use provided values or defaults for vision models
-                optim_value = training_args.get("optim", "adamw_torch_fused")
+                optim_value = _resolve_optim(training_args.get("optim", "adamw_torch_fused"))
                 lr_scheduler_type_value = training_args.get(
                     "lr_scheduler_type", "cosine"
                 )
