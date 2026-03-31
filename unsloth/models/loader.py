@@ -36,6 +36,8 @@ from .loader_utils import (
     _get_fp8_mode_and_check_settings,
     _offline_quantize_to_fp8,
     _tag_model_with_fp8_torchao_config,
+    _tag_model_with_torchao_int_config,
+    _TORCHAO_INT_MODES,
     get_model_name,
     prepare_device_map,
 )
@@ -392,7 +394,10 @@ class FastLanguageModel(FastLlamaModel):
                 token = token,
                 trust_remote_code = trust_remote_code,
             )
-            if new_model_name is None and load_in_fp8 != False:
+            if load_in_fp8 in _TORCHAO_INT_MODES:
+                if new_model_name is not None:
+                    model_name = new_model_name
+            elif new_model_name is None and load_in_fp8 != False:
                 fp8_mode = _get_fp8_mode_and_check_settings(
                     load_in_fp8,
                     fast_inference,
@@ -789,7 +794,9 @@ class FastLanguageModel(FastLlamaModel):
                 elif isinstance(quantization_config, dict):
                     model.config.update({"quantization_config": quantization_config})
 
-        if load_in_fp8 != False:
+        if load_in_fp8 in _TORCHAO_INT_MODES:
+            _tag_model_with_torchao_int_config(model, load_in_fp8)
+        elif load_in_fp8 != False:
             _tag_model_with_fp8_torchao_config(model, fp8_mode)
 
         if is_peft:
@@ -929,7 +936,7 @@ class FastModel(FastBaseModel):
             )
             dtype = torch.float16
         assert dtype in (torch.float16, torch.bfloat16, torch.float32)
-        assert load_in_fp8 in (True, False, "block")
+        assert load_in_fp8 in (True, False, "block") or load_in_fp8 in _TORCHAO_INT_MODES
 
         patch_compiled_autograd()
         patch_compiling_bitsandbytes()
@@ -1021,7 +1028,10 @@ class FastModel(FastBaseModel):
             new_model_name = get_model_name(
                 model_name, load_in_4bit = load_in_4bit, load_in_fp8 = load_in_fp8
             )
-            if new_model_name is None and load_in_fp8 != False:
+            if load_in_fp8 in _TORCHAO_INT_MODES:
+                if new_model_name is not None:
+                    model_name = new_model_name
+            elif new_model_name is None and load_in_fp8 != False:
                 fp8_mode = _get_fp8_mode_and_check_settings(
                     load_in_fp8,
                     fast_inference,
@@ -1535,7 +1545,9 @@ class FastModel(FastBaseModel):
                 elif isinstance(quantization_config, dict):
                     model.config.update({"quantization_config": quantization_config})
 
-        if load_in_fp8 != False:
+        if load_in_fp8 in _TORCHAO_INT_MODES:
+            _tag_model_with_torchao_int_config(model, load_in_fp8)
+        elif load_in_fp8 != False:
             _tag_model_with_fp8_torchao_config(model, fp8_mode)
 
         if is_peft:

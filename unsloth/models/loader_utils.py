@@ -221,6 +221,9 @@ def _resolve_with_mappers(
     )
 
 
+_TORCHAO_INT_MODES = ("int4_weight_only", "int8_weight_only")
+
+
 def get_model_name(
     model_name,
     load_in_4bit = True,
@@ -228,11 +231,13 @@ def get_model_name(
     token = None,
     trust_remote_code = False,
 ):
-    assert load_in_fp8 in (True, False, "block")
+    assert load_in_fp8 in (True, False, "block") or load_in_fp8 in _TORCHAO_INT_MODES
+    # torchao INT modes have no pre-quantized model variants; look up as if fp8 is off
+    fp8_for_lookup = False if load_in_fp8 in _TORCHAO_INT_MODES else load_in_fp8
     new_model_name = _resolve_with_mappers(
         model_name = model_name,
         load_in_4bit = load_in_4bit,
-        load_in_fp8 = load_in_fp8,
+        load_in_fp8 = fp8_for_lookup,
         int_to_float = INT_TO_FLOAT_MAPPER,
         float_to_int = FLOAT_TO_INT_MAPPER,
         map_to_unsloth_16bit = MAP_TO_UNSLOTH_16bit,
@@ -258,7 +263,7 @@ def get_model_name(
         upgraded_model_name = _resolve_with_mappers(
             model_name = model_name,
             load_in_4bit = load_in_4bit,
-            load_in_fp8 = load_in_fp8,
+            load_in_fp8 = fp8_for_lookup,
             int_to_float = NEW_INT_TO_FLOAT_MAPPER,
             float_to_int = NEW_FLOAT_TO_INT_MAPPER,
             map_to_unsloth_16bit = NEW_MAP_TO_UNSLOTH_16bit,
@@ -338,6 +343,22 @@ def _tag_model_with_fp8_torchao_config(model: torch.nn.Module, fp8_mode: str):
     """
     try:
         base_config = _get_torchao_fp8_config(fp8_mode)
+        model.torchao_config = TorchAOConfig(
+            qat_scheme = None,
+            base_config_and_filter_fns = [(base_config, None)],
+        )
+    except:
+        pass
+
+
+def _tag_model_with_torchao_int_config(model: torch.nn.Module, mode: str):
+    """Tag a model with a TorchAOConfig for INT4 or INT8 weight-only quantization (MPS/torchao)."""
+    try:
+        import torchao.quantization as tq
+        if mode == "int4_weight_only":
+            base_config = tq.Int4WeightOnlyConfig()
+        else:
+            base_config = tq.Int8WeightOnlyConfig()
         model.torchao_config = TorchAOConfig(
             qat_scheme = None,
             base_config_and_filter_fns = [(base_config, None)],

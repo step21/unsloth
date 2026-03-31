@@ -123,7 +123,10 @@ try:
 except:
     # Old HF Hub versions <= 0.0.25
     from huggingface_hub.utils._token import get_token
-from triton import __version__ as triton_version
+try:
+    from triton import __version__ as triton_version
+except ImportError:
+    triton_version = "N/A"
 
 HAS_XFORMERS = xformers is not None
 BlockDiagonalCausalMask = (

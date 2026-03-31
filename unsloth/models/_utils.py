@@ -228,6 +228,8 @@ def apply_unsloth_gradient_checkpointing(
 def prefer_flex_attn_if_supported(model_class, config):
     if os.environ.get("UNSLOTH_ENABLE_FLEX_ATTENTION", "1") == "0":
         return None
+    if DEVICE_TYPE == "mps":
+        return None
     try:
         from transformers.utils.import_utils import is_torch_flex_attn_available
 
@@ -971,6 +973,12 @@ elif DEVICE_TYPE == "hip":
             HAS_FLASH_ATTENTION = False
 elif DEVICE_TYPE == "xpu":
     SUPPORTS_BFLOAT16 = True
+elif DEVICE_TYPE == "mps":
+    try:
+        torch.zeros(1, dtype=torch.bfloat16, device="mps")
+        SUPPORTS_BFLOAT16 = True
+    except Exception:
+        SUPPORTS_BFLOAT16 = False
 
 # =============================================
 # Get Xformers
@@ -1874,11 +1882,22 @@ def _unsloth_pre_compute_loss(self, model, inputs, *args, **kwargs):
             inner_model = inner_model.model
         name = inner_model.__class__.__name__
 
-        logger.warning_once(
-            f"Unsloth: Not an error, but {name} does not accept `num_items_in_batch`.\n"
-            "Using gradient accumulation will be very slightly less accurate.\n"
-            "Read more on gradient accumulation issues here: https://unsloth.ai/blog/gradient"
-        )
+        if getattr(self, "model_accepts_loss_kwargs", False):
+            # Model forward has **kwargs and could accept num_items_in_batch, but it
+            # wasn't computed — most likely because the dataset batch has no "labels"
+            # key (e.g. raw-text datasets, or non-SFT collators).
+            logger.warning_once(
+                f"Unsloth: Not an error, but `num_items_in_batch` could not be computed "
+                f"(no 'labels' key in batch for {name}).\n"
+                "Using gradient accumulation will be very slightly less accurate.\n"
+                "Read more on gradient accumulation issues here: https://unsloth.ai/blog/gradient"
+            )
+        else:
+            logger.warning_once(
+                f"Unsloth: Not an error, but {name} does not accept `num_items_in_batch`.\n"
+                "Using gradient accumulation will be very slightly less accurate.\n"
+                "Read more on gradient accumulation issues here: https://unsloth.ai/blog/gradient"
+            )
     # Gemma3 multimodal models in transformers 5.x require token_type_ids during training.
     # For text-only SFT, token_type_ids should be all zeros (no image tokens).
     if "token_type_ids" not in inputs and "input_ids" in inputs:
