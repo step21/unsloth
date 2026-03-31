@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warnings, importlib, sys, typing
+import warnings, importlib, sys
 from packaging.version import Version
 import os, re, subprocess, inspect, functools
 import numpy as np
@@ -21,128 +21,6 @@ import types
 # Log Unsloth is being used
 os.environ["UNSLOTH_IS_PRESENT"] = "1"
 
-# [TODO] Monkeypatch torch.cuda and unsloth_zoo for Apple Silicon early
-# We must do this before any other imports that might trigger torch internals.
-# We mock torch.cuda and its submodules to satisfy internal PyTorch and library dependencies.
-try:
-    import torch
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        import psutil
-        _vm = psutil.virtual_memory()
-
-        class _CudaDeviceProperties:
-            def __init__(self, name, major, minor, total_memory, multi_processor_count):
-                self.name = name; self.major = major; self.minor = minor
-                self.total_memory = total_memory; self.multi_processor_count = multi_processor_count
-
-        def _mem_get_info(device=None): return (_vm.available, _vm.total)
-
-        cuda_attrs = {
-            "is_available" : lambda: False,
-            "is_initialized" : lambda: False,
-            "_is_compiled" : lambda: False,
-            "_is_in_bad_fork" : lambda: False,
-            "_lazy_init" : lambda: None,
-            "device_count" : lambda: 0,
-            "current_device" : lambda: 0,
-            "set_device" : lambda x: None,
-            "synchronize" : lambda x=None: None,
-            "empty_cache" : lambda: None,
-            "memory_allocated" : lambda x=None: 0,
-            "memory_reserved" : lambda x=None: 0,
-            "get_device_name" : lambda x=None: "Apple Silicon",
-            "get_device_capability" : lambda x=None: (0, 0),
-            "is_bf16_supported" : lambda: True,
-            "mem_get_info" : _mem_get_info,
-            "get_device_properties" : lambda x=None: _CudaDeviceProperties("Apple Silicon", 0, 0, _vm.total, 0),
-            "_CudaDeviceProperties" : _CudaDeviceProperties,
-            "cudart" : lambda: type("Cudart", (), {"cudaMemGetInfo": lambda self, d: _mem_get_info(d)})(),
-        }
-
-        # Use a type so it can be used in isinstance() checks
-        class MockModule(type):
-            def __new__(cls, *args, **kwargs):
-                if len(args) == 3: return super().__new__(cls, *args, **kwargs)
-                name = args[0] if (args and isinstance(args[0], str)) else "mock"
-                attrs = args[1] if (len(args) > 1 and isinstance(args[1], dict)) else {}
-                return super().__new__(cls, name, (object,), attrs)
-            def __init__(cls, *args, **kwargs):
-                name = args[0] if (args and isinstance(args[0], str)) else "mock"
-                cls.__name__ = name
-                cls.__file__ = f"<mock {name}>"
-                cls.__path__ = []
-            def __getattr__(cls, name):
-                if name == "__spec__": return None
-                if name.startswith("__"): return super().__getattribute__(name)
-                full_name = f"{cls.__name__}.{name}"
-                if full_name in sys.modules: return sys.modules[full_name]
-                m = MockModule(full_name)
-                setattr(cls, name, m)
-                sys.modules[full_name] = m
-                return m
-            def __call__(cls, *args, **kwargs): return cls
-            def __enter__(cls): return cls
-            def __exit__(cls, *args): pass
-            def __bool__(cls): return False
-            def __or__(cls, other): return typing.Union[cls, other]
-            def __ror__(cls, other): return typing.Union[other, cls]
-
-        class MockFinder(importlib.abc.MetaPathFinder):
-            def find_spec(self, fullname, path, target=None):
-                if fullname == "triton" or fullname.startswith("triton.") or \
-                   fullname == "bitsandbytes" or fullname.startswith("bitsandbytes.") or \
-                   fullname == "unsloth_studio" or fullname.startswith("unsloth_studio.") or \
-                   fullname == "torchvision" or fullname.startswith("torchvision."):
-                    return importlib.util.spec_from_loader(fullname, MockLoader(fullname))
-                return None
-
-        class MockLoader(importlib.abc.Loader):
-            def __init__(self, name): self.name = name
-            def create_module(self, spec):
-                if self.name in sys.modules: return sys.modules[self.name]
-                # Provide realistic version strings to avoid InvalidVersion errors
-                attrs = None
-                if self.name == "triton": attrs = {"__version__": "3.0.0"}
-                elif self.name == "bitsandbytes": attrs = {"__version__": "0.45.0"}
-                m = MockModule(self.name, attrs)
-                sys.modules[self.name] = m
-                return m
-            def exec_module(self, module): pass
-
-        sys.meta_path.insert(0, MockFinder())
-
-        for mod_name in ["torch.cuda", "torch.cuda.memory", "torch.cuda.amp", "torch.cuda.random", "torch.cuda.nccl", "torch.cuda._pin_memory_utils"]:
-            sys.modules[mod_name] = MockModule(mod_name, cuda_attrs)
-
-        torch.cuda = sys.modules["torch.cuda"]
-        torch.cuda.memory = sys.modules["torch.cuda.memory"]
-        torch.cuda.amp = sys.modules["torch.cuda.amp"]
-        torch.cuda.random = sys.modules["torch.cuda.random"]
-
-        # Specific sub-module fixes for torch.amp integration
-        _autocast = getattr(torch.amp, "autocast", None) if hasattr(torch, "amp") else None
-        torch.cuda.amp.autocast = _autocast
-        torch.cuda.amp.autocast_mode = MockModule("torch.cuda.amp.autocast_mode", {"autocast": _autocast})
-
-        # Monkeypatch unsloth_zoo.device_type to prevent early NotImplementedError
-        sys.modules["unsloth_zoo.device_type"] = MockModule("unsloth_zoo.device_type", {
-            "get_device_type" : lambda: "mps",
-            "is_hip" : lambda: False,
-            "is_mps" : lambda: True,
-            "DEVICE_TYPE" : "mps",
-            "DEVICE_TYPE_TORCH" : "mps",
-            "DEVICE_COUNT" : 1,
-            "ALLOW_PREQUANTIZED_MODELS" : True,
-            "ALLOW_BITSANDBYTES" : False,
-            "clean_gpu_cache" : lambda: None,
-            "get_current_device" : lambda: "mps",
-            "is_bf16_supported" : lambda: True,
-            "get_device_name" : lambda x=None: "Apple Silicon",
-            "device_synchronize" : lambda x=None: None,
-            "SUPPORTS_BFLOAT16" : True,
-        })
-except:
-    pass
 
 # Check if modules that need patching are already imported
 critical_modules = ["trl", "transformers", "peft"]
@@ -354,7 +232,8 @@ elif DEVICE_TYPE == "mps":
 
 # For Gradio HF Spaces?
 # if "SPACE_AUTHOR_NAME" not in os.environ and "SPACE_REPO_NAME" not in os.environ:
-import triton
+if DEVICE_TYPE != "mps":
+    import triton
 
 if DEVICE_TYPE == "mps":
     # Skip CUDA-specific logic for MPS
