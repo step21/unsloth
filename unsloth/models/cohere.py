@@ -121,8 +121,12 @@ def CohereAttention_fast_forward(
     # Extend RoPE dynamically to fit in VRAM
     if position_embeddings:
         cos, sin = position_embeddings
+        cos = cos.to(device = Q.device, dtype = Q.dtype)
+        sin = sin.to(device = Q.device, dtype = Q.dtype)
     else:
-        cos, sin = self.rotary_emb.get_cached(kv_seq_len, Q.device.index)
+        cos, sin = self.rotary_emb.get_cached(kv_seq_len, Q.device.index or 0)
+        cos = cos.to(device = Q.device, dtype = Q.dtype)
+        sin = sin.to(device = Q.device, dtype = Q.dtype)
 
     rope_position_ids = (
         position_ids if position_ids is not None else kwargs.get("position_ids")
@@ -356,9 +360,9 @@ def CohereAttention_fast_forward_inference(
 
     # cos, sin = self.rotary_emb(Vn, seq_len = kv_seq_len)
     # Qn, Kn = inplace_rope_embedding(Qn, Kn, cos, sin, position_ids)
-    cos, sin = self.rotary_emb.get_cached(kv_seq_len, Qn.device.index)
-    cos = cos[position_ids].unsqueeze(1)
-    sin = sin[position_ids].unsqueeze(1)
+    cos, sin = self.rotary_emb.get_cached(kv_seq_len, Qn.device.index or 0)
+    cos = cos[position_ids].unsqueeze(1).to(device = Qn.device, dtype = Qn.dtype)
+    sin = sin[position_ids].unsqueeze(1).to(device = Qn.device, dtype = Qn.dtype)
     h = self.half_head_dim
 
     RH_Q = self.RH_Q

@@ -110,6 +110,8 @@ def GraniteAttention_fast_forward(
 
     assert position_embeddings is not None
     cos, sin = position_embeddings
+    cos = cos.to(device = Q.device, dtype = Q.dtype)
+    sin = sin.to(device = Q.device, dtype = Q.dtype)
     rope_position_ids = (
         position_ids if position_ids is not None else kwargs.get("position_ids")
     )
@@ -467,7 +469,7 @@ def GraniteModel_fast_forward_inference(
         attention_mask = None
 
     position_embeddings = self.model.rotary_emb.get_cached(
-        self.max_seq_length, hidden_states.device.index
+        self.max_seq_length, hidden_states.device.index or 0
     )
 
     next_decoder_cache = []

@@ -212,7 +212,7 @@ def _fix_rope_inv_freq(model):
                     emb = torch.cat((freqs, freqs), dim = -1)
                     for device_idx in range(len(module.multi_gpu_short_cos_cached)):
                         if module.multi_gpu_short_cos_cached[device_idx] is not None:
-                            device_obj = torch.device(device_idx)
+                            device_obj = torch.device(device_idx) if DEVICE_TYPE_TORCH == "cuda" else torch.device(DEVICE_TYPE_TORCH)
                             module.multi_gpu_short_cos_cached[device_idx] = (
                                 emb.cos() * module.scaling_factor
                             ).to(dtype = dtype, device = device_obj, non_blocking = True)

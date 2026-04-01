@@ -124,10 +124,14 @@ def FalconH1Attention_fast_forward(
     # Extend RoPE dynamically to fit in VRAM
     if position_embeddings and kv_seq_len <= position_embeddings[0].shape[0]:
         cos, sin = position_embeddings
+        cos = cos.to(device = Q.device, dtype = Q.dtype)
+        sin = sin.to(device = Q.device, dtype = Q.dtype)
     else:
         rotary_emb = self.rotary_emb
         rotary_emb.extend_rope_embedding(V, seq_len = kv_seq_len)
-        cos, sin = rotary_emb.get_cached(kv_seq_len, Q.device.index)
+        cos, sin = rotary_emb.get_cached(kv_seq_len, Q.device.index or 0)
+        cos = cos.to(device = Q.device, dtype = Q.dtype)
+        sin = sin.to(device = Q.device, dtype = Q.dtype)
 
     rope_position_ids = (
         position_ids if position_ids is not None else kwargs.get("position_ids")
@@ -312,9 +316,9 @@ def FalconH1Attention_fast_forward_inference(
     # Need to do it prior 2 steps before hitting full on short KV cache
     # or else error
     self.rotary_emb.extend_rope_embedding(Vn, seq_len + 2)
-    cos, sin = self.rotary_emb.get_cached(kv_seq_len, Qn.device.index)
-    cos = cos[position_ids].unsqueeze(1)
-    sin = sin[position_ids].unsqueeze(1)
+    cos, sin = self.rotary_emb.get_cached(kv_seq_len, Qn.device.index or 0)
+    cos = cos[position_ids].unsqueeze(1).to(device = Qn.device, dtype = Qn.dtype)
+    sin = sin[position_ids].unsqueeze(1).to(device = Qn.device, dtype = Qn.dtype)
     h = self.half_head_dim
 
     RH_Q = self.RH_Q

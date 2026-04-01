@@ -298,9 +298,10 @@ class GemmaFixedRotaryEmbedding(torch.nn.Module):
 
         # Build here to make `torch.jit.trace` work.
         for device in range(DEVICE_COUNT):
+            device_obj = torch.device(device) if DEVICE_TYPE_TORCH == "cuda" else torch.device(DEVICE_TYPE_TORCH)
             self._set_cos_sin_cache(
                 seq_len = self.current_rope_size,
-                device = torch.device(device),
+                device = device_obj,
                 dtype = torch.get_default_dtype(),
             )
 
@@ -332,8 +333,8 @@ class GemmaFixedRotaryEmbedding(torch.nn.Module):
         # We must do RoPE in float32!
         cos = emb.cos().to(device = device, non_blocking = True)  # , dtype = dtype)
         sin = emb.sin().to(device = device, non_blocking = True)  # , dtype = dtype)
-        self.multi_gpu_cos_cached[device.index] = cos
-        self.multi_gpu_sin_cached[device.index] = sin
+        self.multi_gpu_cos_cached[device.index or 0] = cos
+        self.multi_gpu_sin_cached[device.index or 0] = sin
         return cos, sin
 
     def forward(self, x, position_ids = None, seq_len = None):
@@ -341,7 +342,7 @@ class GemmaFixedRotaryEmbedding(torch.nn.Module):
         if seq_len is not None and seq_len > self.current_rope_size:
             self._set_cos_sin_cache(seq_len = seq_len, device = x.device, dtype = x.dtype)
 
-        device_index = x.device.index
+        device_index = x.device.index or 0
 
         return (
             self.multi_gpu_cos_cached[device_index][:seq_len],
@@ -349,9 +350,8 @@ class GemmaFixedRotaryEmbedding(torch.nn.Module):
         )
 
     def get_cached(self, seq_len = None, device_index = None):
-        if device_index is None:
-            device_index = get_current_device()
-            if device_index == "mps": device_index = 0
+        if not isinstance(device_index, int):
+            device_index = 0
         return self.multi_gpu_cos_cached[device_index], self.multi_gpu_sin_cached[
             device_index
         ]
@@ -362,8 +362,9 @@ class GemmaFixedRotaryEmbedding(torch.nn.Module):
         # Iteratively grow by increments of 8192
         self.current_rope_size = math.ceil(seq_len / 8192) * 8192
         for device in range(DEVICE_COUNT):
+            device_obj = torch.device(device) if DEVICE_TYPE_TORCH == "cuda" else torch.device(DEVICE_TYPE_TORCH)
             self._set_cos_sin_cache(
-                self.current_rope_size, device = torch.device(device), dtype = x.dtype
+                self.current_rope_size, device = device_obj, dtype = x.dtype
             )
 
 
@@ -412,8 +413,8 @@ class GemmaFixedLinearScalingRotaryEmbedding(GemmaFixedRotaryEmbedding):
         # We must do RoPE in float32!
         cos = emb.cos().to(device = device, non_blocking = True)  # , dtype = dtype)
         sin = emb.sin().to(device = device, non_blocking = True)  # , dtype = dtype)
-        self.multi_gpu_cos_cached[device.index] = cos
-        self.multi_gpu_sin_cached[device.index] = sin
+        self.multi_gpu_cos_cached[device.index or 0] = cos
+        self.multi_gpu_sin_cached[device.index or 0] = sin
         return cos, sin
 
 

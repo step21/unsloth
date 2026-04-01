@@ -110,7 +110,7 @@ def Gemma2Attention_fast_forward(
     if past_key_value is not None:
         kv_seq_len += past_key_value[0].shape[-2]
 
-    device_index = Q.device.index
+    device_index = Q.device.index or 0
     cos = self.rotary_emb.multi_gpu_cos_cached[device_index]
     sin = self.rotary_emb.multi_gpu_sin_cached[device_index]
 
@@ -393,9 +393,9 @@ def Gemma2Attention_fast_forward_inference(
 
     # cos, sin = self.rotary_emb(Vn, seq_len = kv_seq_len)
     # Qn, Kn = inplace_rope_embedding(Qn, Kn, cos, sin, position_ids)
-    cos, sin = self.rotary_emb.get_cached(kv_seq_len, Qn.device.index)
-    cos = cos[position_ids].unsqueeze(1)
-    sin = sin[position_ids].unsqueeze(1)
+    cos, sin = self.rotary_emb.get_cached(kv_seq_len, Qn.device.index or 0)
+    cos = cos[position_ids].unsqueeze(1).to(device = Qn.device, dtype = Qn.dtype)
+    sin = sin[position_ids].unsqueeze(1).to(device = Qn.device, dtype = Qn.dtype)
     h = self.half_head_dim
 
     RH_Q = self.RH_Q
