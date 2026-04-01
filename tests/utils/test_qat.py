@@ -138,8 +138,9 @@ def _test_fake_quantizers_are_called(
                     # Weight fake quantizers should always be called
                     assert child.weight_fake_quantizer.count == 1
 
+    model_device = next(model.parameters()).device
     for k, v in example_inputs.items():
-        example_inputs[k] = v.cuda()
+        example_inputs[k] = v.to(model_device)
     model.apply(_swap_fake_quantizers)
     model(**example_inputs)
     model.apply(_assert_fake_quantizers_are_called)
