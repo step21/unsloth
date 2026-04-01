@@ -171,9 +171,10 @@ def _fix_rope_inv_freq(model):
             module.inv_freq = inv_freq
             for device_idx in range(len(module.multi_gpu_cos_cached)):
                 if module.multi_gpu_cos_cached[device_idx] is not None:
+                    device_obj = torch.device(device_idx) if DEVICE_TYPE_TORCH == "cuda" else torch.device(DEVICE_TYPE_TORCH)
                     module._set_cos_sin_cache(
                         seq_len = module.current_rope_size,
-                        device = torch.device(device_idx),
+                        device = device_obj,
                         dtype = torch.get_default_dtype(),
                     )
 
