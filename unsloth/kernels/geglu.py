@@ -152,16 +152,11 @@ if _HAS_TRITON:
 
 def geglu_exact_backward_kernel(DW, e, g):
     if is_mps():
-        # Standard autograd should handle backward if we don't use the kernel.
-        # But Unsloth uses these manual kernels for speed.
-        # In MPS, we'll let it be handled by standard autograd if we are not using these kernels.
-        # Actually, if we are in the backward pass of a custom autograd function, we need this.
-        # For now, let's provide a basic PyTorch version.
         orig_dtype = e.dtype
-        e = e.to(torch.float32)
-        f_partial = 0.5 * (torch.erf(e / 1.4142135623730951) + 1.0)
-        f = (f_partial * e).to(orig_dtype)
-        df_de = (f_partial + 0.3989422804014327 * e * torch.exp(-0.5 * e * e)).to(orig_dtype)
+        e_fp32 = e.float()
+        f_partial = 0.5 * (torch.erf(e_fp32 / 1.4142135623730951) + 1.0)
+        f = (f_partial * e_fp32).to(orig_dtype)
+        df_de = (f_partial + 0.3989422804014327 * e_fp32 * torch.exp(-0.5 * e_fp32 * e_fp32)).to(orig_dtype)
         h = f * g
         df = DW * f
         dg = DW * g
@@ -314,21 +309,16 @@ if _HAS_TRITON:
 
 def geglu_approx_backward_kernel(DW, e, g):
     if is_mps():
-        # Standard autograd should handle backward if we don't use the kernel.
-        # But Unsloth uses these manual kernels for speed.
-        # In MPS, we'll let it be handled by standard autograd if we are not using these kernels.
-        # Actually, if we are in the backward pass of a custom autograd function, we need this.
-        # For now, let's provide a basic PyTorch version.
         orig_dtype = e.dtype
-        e = e.to(torch.float32)
+        e_fp32 = e.float()
         s = 0.7978845608028654
-        a = s * e
-        b = a * 0.044715 * e * e
+        a = s * e_fp32
+        b = a * 0.044715 * e_fp32 * e_fp32
         T = 1.0 + torch.tanh(a + b)
         T2 = 0.5 * T
         Q2 = -T2 * (T - 2.0) * (a + 3.0 * b)
         df_de = (T2 + Q2).to(orig_dtype)
-        f = (T2 * e).to(orig_dtype)
+        f = (T2 * e_fp32).to(orig_dtype)
         h = f * g
         df = DW * f
         dg = DW * g
