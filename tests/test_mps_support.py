@@ -2,7 +2,7 @@
 import os
 import torch
 import unittest
-from unsloth import FastLanguageModel
+from unsloth import FastLanguageModel, is_bfloat16_supported
 from transformers import TrainingArguments
 from trl import SFTTrainer
 from datasets import Dataset
@@ -91,8 +91,8 @@ class TestMPSSupport(unittest.TestCase):
                 warmup_steps = 5,
                 max_steps = 10,
                 learning_rate = 2e-4,
-                fp16 = True,
-                bf16 = False,
+                fp16 = not is_bfloat16_supported(),
+                bf16 = is_bfloat16_supported(),
                 logging_steps = 1,
                 output_dir = "outputs",
                 report_to = "none",
