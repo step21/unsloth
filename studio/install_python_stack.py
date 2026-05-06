@@ -37,12 +37,18 @@ _TOTAL: int = 0  # set at runtime in install_python_stack() based on platform
 
 # ── Paths ──────────────────────────────────────────────────────────────
 SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent  # root of the unsloth fork (contains pyproject.toml)
 REQ_ROOT = SCRIPT_DIR / "backend" / "requirements"
 SINGLE_ENV = REQ_ROOT / "single-env"
 CONSTRAINTS = SINGLE_ENV / "constraints.txt"
 LOCAL_DD_UNSTRUCTURED_PLUGIN = (
     SCRIPT_DIR / "backend" / "plugins" / "data-designer-unstructured-seed"
 )
+
+# Local forks — installed in editable mode if present (override PyPI versions).
+# unsloth-zoo is expected as a sibling of the unsloth fork repo root.
+LOCAL_UNSLOTH = REPO_ROOT if (REPO_ROOT / "pyproject.toml").is_file() else None
+LOCAL_UNSLOTH_ZOO = (REPO_ROOT.parent / "unsloth-zoo") if (REPO_ROOT.parent / "unsloth-zoo" / "pyproject.toml").is_file() else None
 
 # ── Color support ──────────────────────────────────────────────────────
 
@@ -292,6 +298,10 @@ def install_python_stack() -> int:
     global USE_UV, _STEP, _TOTAL
     _STEP = 0
     _TOTAL = 10 if IS_WINDOWS else 11
+    if LOCAL_UNSLOTH_ZOO is not None:
+        _TOTAL += 1
+    if LOCAL_UNSLOTH is not None:
+        _TOTAL += 1
 
     # 1. Upgrade pip (needed even with uv as fallback and for bootstrapping)
     _progress("pip upgrade")
@@ -307,6 +317,25 @@ def install_python_stack() -> int:
         "--no-cache-dir",
         req = REQ_ROOT / "base.txt",
     )
+
+    # 2b. Override PyPI installs with local forks (editable) when present.
+    # unsloth-zoo must be installed before unsloth (unsloth depends on it).
+    if LOCAL_UNSLOTH_ZOO is not None:
+        pip_install(
+            "Installing local unsloth-zoo fork",
+            "--no-cache-dir",
+            "-e",
+            str(LOCAL_UNSLOTH_ZOO),
+            constrain = False,
+        )
+    if LOCAL_UNSLOTH is not None:
+        pip_install(
+            "Installing local unsloth fork",
+            "--no-cache-dir",
+            "-e",
+            str(LOCAL_UNSLOTH),
+            constrain = False,
+        )
 
     # 3. Extra dependencies
     _progress("unsloth extras")
@@ -334,7 +363,7 @@ def install_python_stack() -> int:
         req = REQ_ROOT / "overrides.txt",
     )
 
-    # 5. Triton kernels (no-deps, from source)
+    # 5. Triton kernels (no-deps, from source) — Linux only
     if not IS_WINDOWS and sys.platform != "darwin":
         _progress("triton kernels")
         pip_install(
